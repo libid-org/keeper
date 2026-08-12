@@ -1,0 +1,144 @@
+# Eden testnet — desired state for the libid contract stack.
+#
+# ============================================================================
+# LEGACY DEPLOYMENT (pre-Notary, pre-factory, libid-contracts 0.1.x)
+#
+# This file describes the deployment made BEFORE the shared Notary contract
+# existed: each contract here was initialized with the notary SIGNER address
+# directly, and there is no Notary proxy on this chain. Consequences:
+#
+#   - `plan` reports `contracts.notary` as missing (DEPLOY) — expected.
+#   - Consumer wiring checks (`*.notary_wiring`) WARN: these contracts have
+#     no `notaryContract()` getter. Also expected.
+#   - `validate` still passes; the file stays the record of what is live
+#     until the planned fresh redeploy replaces this stack with one wired
+#     through the Notary contract.
+#
+# Do NOT run `apply` expecting convergence: the 0.2.0+ flow cannot retrofit
+# a Notary contract into contracts initialized without one.
+#
+# These addresses also predate the deterministic factory (libid-contracts
+# 0.3.0): they were plain CREATE deploys and do NOT match the canonical
+# name-derived CREATE3 addresses a fresh apply produces. The planned fresh
+# redeploy will move the stack onto the factory-first addresses.
+# ============================================================================
+#
+# HOW TO READ THIS FILE
+#
+# Every value here is public: contract addresses, a public RPC, and OAuth
+# *client ids* (not secrets). The only secret in the flow is the KMS key,
+# which never leaves AWS.
+#
+# INPUT keys describe what should exist: accounts, client ids, tokens,
+# templates. You edit these.
+#
+# OUTPUT keys record what a deploy produced: everything under [contracts]
+# and [identity]. An EMPTY value ("" ) or an ABSENT key means "not deployed
+# yet" — `libid-deploy apply` deploys it and writes the address back here,
+# then CI opens a PR so the file catches up with reality. Do not fill these
+# by hand unless you are restoring a lost record.
+#
+# Seeded from dyaka's real testnet deployment (deploy/envs/testnet/): the
+# addresses were read from the running backend, not transcribed by hand.
+
+[network]
+name = "eden-testnet"
+chain_id = 3735928814
+rpc_url = "https://ev-reth-eden-testnet.binarybuilders.services:8545"
+
+[aws]
+region = "eu-central-1"
+# The deployer's KMS key. Owns every UUPS proxy and the Bank diamond.
+kms_deployer = "alias/dyaka-testnet-deployer"
+
+# The ADDRESSES OF KEYS, not contracts. `notary` is the notary SIGNER — the
+# EOA/KMS identity whose signatures the stack accepts; on a 0.2.0 deployment
+# the Notary CONTRACT (`contracts.notary`) stores it. `oidc_notary` is the
+# legacy separate JWKS-rotation authority this pre-Notary deployment wired
+# into its OIDC verifier; 0.2.0 no longer uses it. `backend` is the backend's
+# own signing identity; the Bank grants it the backend role at construction.
+[accounts]
+notary = "0x7a3646e8431a4b0c8bb586a7d26d7da7ae4aa2b5"
+oidc_notary = "0x3b02dc7c278125dd3ea686d09335f7cd6604e5f2"
+backend = "0xe9b132c2eccca08efaf62d18c301945f38ddc267"
+
+# OUTPUT: deployed contract addresses. Empty/absent = not deployed yet.
+#
+# `notary` is the Notary PROXY — the one contract everything verifies notary
+# attestations through since 0.2.0. Empty here because this legacy stack
+# predates it (see the header). The retired NotaryRegistry proxy of the
+# 0.1.x deployment lived at 0xe460b1bf58f48a2ac90889b269d27e145e845a92;
+# kept as a comment so the record is not lost.
+[contracts]
+notary = ""
+bank = "0x954a99f1756cf281caa0aa81c12b582fcf7c8d94"
+registry = "0xd764dbc5e51a042c004c52833f7e2f32b0cc651e"
+wallet_factory = "0xd46181cab629aeda48406b462656513821de6775"
+x_zk_verifier = "0x3f753cde17a261d6a6edf9d6846785d18bdb6efd"
+google_oidc_verifier = "0x69cc7c69b39ada71ce908d432868d5ef9a6a6d0e"
+
+# OUTPUT: the identity-names stack. The whole section is absent because it is
+# not deployed on this network yet. To request it, add:
+#
+#   [identity]
+#   identity_names = ""
+#   github_identity_verifier = ""
+#   # optional, each needs a large Honk circuit verifier:
+#   x_identity_verifier = ""
+#   google_identity_verifier = ""   # also deploys identity_jwks_roots
+#
+# A key that is PRESENT but empty is a deploy request; a key that is ABSENT
+# is "not wanted". GitHub needs only the notary+backend keys and is always
+# wired once the section exists.
+
+# INPUT: platform rules — OAuth client ids and the bot handles the on-chain
+# templates mention. Client ids are bound into proofs on-chain (the OIDC
+# verifier cannot be deployed without `google_client_id`; it becomes the
+# expected JWT audience). Changing a client id after deploy is NOT applied to
+# an already-deployed verifier — see `--upgrade oidc-verifier`.
+[platforms]
+x_client_id = "TC1ub1JmTDNDSlJjajUxanlrOXA6MTpjaQ"
+google_client_id = "391814431594-1piqeo3a0g2lmnmpseto3106tde3ja97.apps.googleusercontent.com"
+github_bot_handle = "testyakly"
+x_bot_handle = "testyakly"
+
+# INPUT: tokens registered on the Bank. `apply` re-sends registration and
+# tolerates "already registered" errors, so entries are safe to keep.
+[[tokens]]
+symbol = "$TIA"
+address = "0x0000000000000000000000000000000000000000" # native
+
+[[tokens]]
+symbol = "$WTIA"
+address = "0x3e806727b92d676032Ac7EBC7401a46a3ccDA688"
+
+[[tokens]]
+symbol = "$USDC"
+address = "0x0C1c5a78669ea6cb269883ad1B65334319Aacfd7"
+
+[[tokens]]
+symbol = "$TEST"
+address = "0x0D136f5F3C27Bf87E7d00B7516DABD5deead01FA"
+
+# INPUT: platform comment templates pushed to the Bank (@testyakly bots).
+# `apply` clears each listed platform first (setPlatformTemplate is
+# append-only on-chain) and re-seeds exactly this list, so what a reader
+# sees here matches what is on-chain.
+#
+# The template string must appear in the user's post/comment for
+# verification. Use {recipient}, {amount} and {token} placeholders. A
+# template may omit {recipient} (recipient-less form) — the recipient is
+# then inferred from the reply/quote parent.
+[templates]
+"api.github.com" = [
+    "@testyakly honor @{recipient} with {amount} of {token}",
+    "@testyakly honor @{recipient} with {amount} {token}",
+    # Recipient-less omitted for GitHub: no reply-target proof yet — the
+    # on-chain _verifyRecipientIdLeaf needs a proven in_reply_to_user_id.
+]
+"api.x.com" = [
+    "@testyakly honor @{recipient} with {amount} of {token}",
+    "@testyakly honor @{recipient} with {amount} {token}",
+    "@testyakly honor with {amount} of {token}",
+    "@testyakly honor with {amount} {token}",
+]
