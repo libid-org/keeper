@@ -27,7 +27,7 @@ env:
   # The crate's rust-version floor (see Cargo.toml): building on exactly the
   # floor keeps that claim honest, and a pinned toolchain cannot break CI
   # mid-PR.
-  RUST_VERSION: 1.94.1
+  RUST_VERSION: 1.97.1
   # Nightly is for `cargo +"$NIGHTLY" fmt` ONLY: rustfmt options like
   # `imports_granularity` are nightly-only, and stable rustfmt does not reject
   # them — it silently IGNORES them and reports success. Dated pin so a
