@@ -1,6 +1,6 @@
 [package]
 name = "keeper"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 # Inherited floor: the notary lib dependency pulls the `tlsn` MPC graph
 # (unstable `cfg_select!` before 1.94) and the AWS SDK crates via
