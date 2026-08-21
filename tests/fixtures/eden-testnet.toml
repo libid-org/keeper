@@ -38,8 +38,9 @@
 # then CI opens a PR so the file catches up with reality. Do not fill these
 # by hand unless you are restoring a lost record.
 #
-# Seeded from dyaka's real testnet deployment (deploy/envs/testnet/): the
-# addresses were read from the running backend, not transcribed by hand.
+# Seeded from the real testnet deployment (the original monorepo's
+# deploy/envs/testnet/): the addresses were read from the running backend,
+# not transcribed by hand.
 
 [network]
 name = "eden-testnet"

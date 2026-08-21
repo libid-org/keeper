@@ -75,10 +75,10 @@ pub fn kid_hash(kid: &str) -> B256 {
 /// as a 32-byte big-endian word — the exact value the contracts store and
 /// the JWT circuit exposes.
 ///
-/// Vendored from dyaka's `dyaka-oidc-core::compute_modulus_hash` (now
-/// `libid-oidc-core` in the libid repo); an upstream candidate for a shared
-/// libid-rs crate so the keeper, the circuits and the backend can never
-/// drift apart.
+/// Vendored from the original monorepo's `oidc-core::compute_modulus_hash`
+/// (now `libid-oidc-core` in the libid repo); an upstream candidate for a
+/// shared libid-rs crate so the keeper, the circuits and the backend can
+/// never drift apart.
 pub fn modulus_hash(n_b64url: &str) -> Result<B256> {
     const NUM_LIMBS: usize = 18;
     let n_bytes = URL_SAFE_NO_PAD
@@ -158,7 +158,8 @@ mod tests {
     use super::*;
 
     /// `keccak256("oidc-1")`, precomputed via `cast keccak "oidc-1"` — the
-    /// same vector dyaka's rotation listener asserted against.
+    /// same vector the original monorepo's rotation listener asserted
+    /// against.
     #[test]
     fn kid_hash_matches_cast_keccak() {
         let expected = "22f02000da44e4b96e6ba14598619cce801d51d062fe5392dc68ad5fbd641b86";
@@ -166,9 +167,9 @@ mod tests {
     }
 
     /// The vendored limb math is byte-identical to the origin implementation
-    /// (`dyaka-oidc-core::compute_modulus_hash`): both the base64url input
-    /// and the expected hash below were produced by running the original
-    /// against a deterministic 256-byte modulus.
+    /// (the original monorepo's `oidc-core::compute_modulus_hash`): both the
+    /// base64url input and the expected hash below were produced by running
+    /// the original against a deterministic 256-byte modulus.
     #[test]
     fn modulus_hash_matches_origin_implementation() {
         let n_b64url = "BAsSGSAnLjU8Q0pRWF9mbXR7gomQl56lrLO6wcjP1t3k6_L5BQwTGiEoLzY9REtSWWBnbnV8g4qRmJ-mrbS7wsnQ197l7PP6Bg0UGyIpMDc-RUxTWmFob3Z9hIuSmaCnrrW8w8rR2N_m7fT7Bw4VHCMqMTg_Rk1UW2JpcHd-hYyTmqGor7a9xMvS2eDn7vUBCA8WHSQrMjlAR05VXGNqcXh_ho2Um6KpsLe-xczT2uHo7_YCCRAXHiUsMzpBSE9WXWRrcnmAh46VnKOqsbi_xs3U2-Lp8PcDChEYHyYtNDtCSVBXXmVsc3qBiI-WnaSrsrnAx87V3OPq8fgECxIZIA";
