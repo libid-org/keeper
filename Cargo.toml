@@ -27,15 +27,15 @@ path = "src/main.rs"
 # round trip against a running notary), `jwks::mock::MockProver` (the
 # plain-TLS test seam), and the `JwksRotationProof` wire type. The tag pins
 # the exact tlsn/libid-rs graph the notary released with.
-notary = { git = "https://github.com/libid-org/notary", tag = "v0.1.0" }
+notary = { git = "https://github.com/libid-org/notary", tag = "v0.2.0" }
 
 # ── libid-rs shared crates ──────────────────────────────────────────────────
 # Same git tag as the notary dependency pins, so cargo unifies them with the
 # copies arriving through `notary` — mixing the crates.io releases with the
 # git copies would put two incompatible versions of the same types in the
 # graph (libid-tlsn is git-only and exposes sibling-crate types).
-libid-crypto = { git = "https://github.com/libid-org/libid-rs", tag = "v0.1.0" }
-libid-signer = { git = "https://github.com/libid-org/libid-rs", tag = "v0.1.0" }
+libid-crypto = { git = "https://github.com/libid-org/libid-rs", tag = "v0.2.0" }
+libid-signer = { git = "https://github.com/libid-org/libid-rs", tag = "v0.2.0" }
 
 # ── contract bindings + deploy helpers ──────────────────────────────────────
 # The registry crate is fine here: it has no tlsn-adjacent types.
