@@ -3929,8 +3929,8 @@ checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 
 [[package]]
 name = "libid-attestations"
-version = "0.1.0"
-source = "git+https://github.com/libid-org/libid-rs?tag=v0.1.0#a1e5ec80fff5ac5fc3e35381552a0df43e968314"
+version = "0.2.0"
+source = "git+https://github.com/libid-org/libid-rs?tag=v0.2.0#ec71e1536cb76df80cf8c0ca923273d40671db60"
 dependencies = [
  "alloy-primitives",
  "alloy-sol-types",
@@ -3953,8 +3953,8 @@ dependencies = [
 
 [[package]]
 name = "libid-crypto"
-version = "0.1.0"
-source = "git+https://github.com/libid-org/libid-rs?tag=v0.1.0#a1e5ec80fff5ac5fc3e35381552a0df43e968314"
+version = "0.2.0"
+source = "git+https://github.com/libid-org/libid-rs?tag=v0.2.0#ec71e1536cb76df80cf8c0ca923273d40671db60"
 dependencies = [
  "hex",
  "k256",
@@ -3965,8 +3965,8 @@ dependencies = [
 
 [[package]]
 name = "libid-signer"
-version = "0.1.0"
-source = "git+https://github.com/libid-org/libid-rs?tag=v0.1.0#a1e5ec80fff5ac5fc3e35381552a0df43e968314"
+version = "0.2.0"
+source = "git+https://github.com/libid-org/libid-rs?tag=v0.2.0#ec71e1536cb76df80cf8c0ca923273d40671db60"
 dependencies = [
  "alloy",
  "aws-config",
@@ -3977,8 +3977,8 @@ dependencies = [
 
 [[package]]
 name = "libid-tlsn"
-version = "0.1.0"
-source = "git+https://github.com/libid-org/libid-rs?tag=v0.1.0#a1e5ec80fff5ac5fc3e35381552a0df43e968314"
+version = "0.2.0"
+source = "git+https://github.com/libid-org/libid-rs?tag=v0.2.0#ec71e1536cb76df80cf8c0ca923273d40671db60"
 dependencies = [
  "http-body-util",
  "hyper 1.11.0",
@@ -3994,8 +3994,8 @@ dependencies = [
 
 [[package]]
 name = "libid-transcript"
-version = "0.1.0"
-source = "git+https://github.com/libid-org/libid-rs?tag=v0.1.0#a1e5ec80fff5ac5fc3e35381552a0df43e968314"
+version = "0.2.0"
+source = "git+https://github.com/libid-org/libid-rs?tag=v0.2.0#ec71e1536cb76df80cf8c0ca923273d40671db60"
 dependencies = [
  "serde",
  "serde_json",
@@ -4511,8 +4511,8 @@ checksum = "2bf50223579dc7cdcfb3bfcacf7069ff68243f8c363f62ffa99cf000a6b9c451"
 
 [[package]]
 name = "notary"
-version = "0.1.0"
-source = "git+https://github.com/libid-org/notary?tag=v0.1.0#da1ae7e2f4730aa676a70474c3496563f0b75d2f"
+version = "0.2.0"
+source = "git+https://github.com/libid-org/notary?tag=v0.2.0#c55efeb9830ba78796d7f98f183abffe78a58101"
 dependencies = [
  "alloy-primitives",
  "alloy-sol-types",
