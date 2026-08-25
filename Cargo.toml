@@ -1,11 +1,9 @@
 [package]
 name = "keeper"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
-# Inherited floor: the notary lib dependency pulls the `tlsn` MPC graph
-# (unstable `cfg_select!` before 1.94) and the AWS SDK crates via
-# libid-signer declare 1.94.1.
-rust-version = "1.94.1"
+# Inherited floor: TLSNotary alpha.15's MPZ graph requires Rust 1.95.
+rust-version = "1.95"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/libid-org/keeper"
 description = "Permissionless keeper that keeps Google JWKS roots fresh on-chain: obtains MPC-TLS notarized readings of Google's JWKS from a libid notary and submits rotate() to the JWKS contracts on every configured network."
@@ -25,17 +23,17 @@ path = "src/main.rs"
 # ── the notary service's companion library ──────────────────────────────────
 # Prover-side JWKS machinery: `jwks::prover::notarize_jwks` (the real MPC-TLS
 # round trip against a running notary), `jwks::mock::MockProver` (the
-# plain-TLS test seam), and the `JwksRotationProof` wire type. The tag pins
-# the exact tlsn/libid-rs graph the notary released with.
-notary = { git = "https://github.com/libid-org/notary", tag = "v0.2.0" }
+# plain-TLS test seam), and the `JwksRotationProof` wire type. Its source pins
+# the exact tlsn/libid-rs graph the notary was built with.
+notary = { git = "https://github.com/libid-org/notary", rev = "54d366de6a50384ef0678c4b49ad8a46f3219e80" }
 
 # ── libid-rs shared crates ──────────────────────────────────────────────────
-# Same git tag as the notary dependency pins, so cargo unifies them with the
+# Same git revision as the notary dependency pins, so cargo unifies them with the
 # copies arriving through `notary` — mixing the crates.io releases with the
 # git copies would put two incompatible versions of the same types in the
 # graph (libid-tlsn is git-only and exposes sibling-crate types).
-libid-crypto = { git = "https://github.com/libid-org/libid-rs", tag = "v0.2.0" }
-libid-signer = { git = "https://github.com/libid-org/libid-rs", tag = "v0.2.0" }
+libid-crypto = { git = "https://github.com/libid-org/libid-rs", rev = "ad508b2ff5ffeacdfcbf3f4ae1876a43c379a6db" }
+libid-signer = { git = "https://github.com/libid-org/libid-rs", rev = "ad508b2ff5ffeacdfcbf3f4ae1876a43c379a6db" }
 
 # ── contract bindings + deploy helpers ──────────────────────────────────────
 # The registry crate is fine here: it has no tlsn-adjacent types.
