@@ -53,11 +53,11 @@ pub struct KeeperConfig {
     /// shape via `libid_signer::SignerSource::from_spec`.
     #[serde(default)]
     pub signer: Option<String>,
-    /// TEST-ONLY seam: skip MPC-TLS and build proofs with
+    /// TEST-ONLY seam: skip MPC-TLS and build notarized sessions with
     /// [`notary::jwks::mock::MockProver`] signing with this key. The chain
-    /// accepts them only where this key IS the on-chain notary signer, which
-    /// is never true of a production deployment. Refused alongside
-    /// `notary_url`.
+    /// accepts them only where this key IS a notary the Notary Service
+    /// trusts, which is never true of a production deployment. Refused
+    /// alongside `notary_url`.
     #[serde(default)]
     pub mock_notary: Option<MockNotary>,
     /// The networks to keep fresh.
@@ -100,9 +100,6 @@ pub struct NetworkEntry {
     /// Inline: address of the `IdentityJwksRoots` proxy.
     #[serde(default)]
     pub identity_jwks_roots: Option<String>,
-    /// Inline: address of the `GoogleOidcVerifier` proxy.
-    #[serde(default)]
-    pub google_oidc_verifier: Option<String>,
     /// By reference: path to a chain-configurations network file, relative
     /// to the keeper.toml that names it. Mutually exclusive with the inline
     /// fields above — the file is the source of truth.
@@ -113,37 +110,12 @@ pub struct NetworkEntry {
     pub signer: Option<String>,
 }
 
-/// Which JWKS contract a rotation targets. Both expose the same
-/// `rotate(NotarizedJwksProof, JwkClaim[])` ABI; they differ in how trust is
-/// read back (see [`crate::chain`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ContractKind {
-    /// The identity-names stack's Google JWKS trust list.
-    IdentityJwksRoots,
-    /// The login stack's Google OIDC verifier.
-    GoogleOidcVerifier,
-}
-
-impl ContractKind {
-    /// Stable label for logs and the status table.
-    pub fn label(&self) -> &'static str {
-        match self {
-            Self::IdentityJwksRoots => "identity_jwks_roots",
-            Self::GoogleOidcVerifier => "google_oidc_verifier",
-        }
-    }
-}
-
-/// One contract to keep fresh.
-#[derive(Debug, Clone)]
-pub struct Target {
-    /// Which contract shape lives at the address.
-    pub kind: ContractKind,
-    /// The proxy address.
-    pub address: Address,
-}
-
-/// A network after resolution: every target known, every address parsed.
+/// A network after resolution: the contract known, its address parsed.
+///
+/// One JWKS contract per network: `IdentityJwksRoots`, the naming system's
+/// Google trust list, which verifies a rotation through the Notary Service.
+/// The login stack's `GoogleOidcVerifier` used to be a second target; it is
+/// archived with the rest of that product and is not kept fresh any more.
 #[derive(Debug, Clone)]
 pub struct ResolvedNetwork {
     /// Network name.
@@ -152,8 +124,8 @@ pub struct ResolvedNetwork {
     pub rpc_url: String,
     /// Gas signer spec (per-network override, else the global default).
     pub signer: Option<String>,
-    /// The JWKS contracts on this network.
-    pub targets: Vec<Target>,
+    /// The `IdentityJwksRoots` proxy on this network.
+    pub identity_jwks_roots: Address,
 }
 
 impl KeeperConfig {
@@ -209,7 +181,6 @@ impl NetworkEntry {
                 if self.name.is_some()
                     || self.rpc_url.is_some()
                     || self.identity_jwks_roots.is_some()
-                    || self.google_oidc_verifier.is_some()
                 {
                     bail!(
                         "network entry referencing '{}' also sets inline fields — \
@@ -224,12 +195,11 @@ impl NetworkEntry {
                     base.join(file)
                 };
                 let parsed = NetworkFile::load(&path)?;
-                ResolvedNetwork {
-                    name: parsed.network.name,
-                    rpc_url: parsed.network.rpc_url,
-                    signer,
-                    targets: parsed.targets,
-                }
+                (
+                    parsed.network.name,
+                    parsed.network.rpc_url,
+                    parsed.identity_jwks_roots,
+                )
             }
             None => {
                 let name = self
@@ -239,59 +209,37 @@ impl NetworkEntry {
                 let rpc_url = self.rpc_url.clone().with_context(|| {
                     format!("inline network '{name}' is missing `rpc_url`")
                 })?;
-                let mut targets = Vec::new();
-                push_target(
-                    &mut targets,
-                    ContractKind::IdentityJwksRoots,
-                    self.identity_jwks_roots.as_deref(),
-                    &name,
-                )?;
-                push_target(
-                    &mut targets,
-                    ContractKind::GoogleOidcVerifier,
-                    self.google_oidc_verifier.as_deref(),
-                    &name,
-                )?;
-                ResolvedNetwork {
-                    name,
-                    rpc_url,
-                    signer,
-                    targets,
-                }
+                let roots = parse_roots(self.identity_jwks_roots.as_deref(), &name)?;
+                (name, rpc_url, roots)
             }
         };
-        if resolved.targets.is_empty() {
+        let (name, rpc_url, roots) = resolved;
+        let Some(identity_jwks_roots) = roots else {
             bail!(
-                "network '{}' names no JWKS contract (set identity_jwks_roots \
-                 and/or google_oidc_verifier, or reference a network file with \
-                 them deployed)",
-                resolved.name
+                "network '{name}' names no JWKS contract (set identity_jwks_roots, \
+                 or reference a network file with it deployed)"
             );
-        }
-        Ok(resolved)
+        };
+        Ok(ResolvedNetwork {
+            name,
+            rpc_url,
+            signer,
+            identity_jwks_roots,
+        })
     }
 }
 
-/// Parse an address that may be absent or empty ("" means "not deployed" in
-/// the chain-configurations convention) and push a target when present.
-fn push_target(
-    targets: &mut Vec<Target>,
-    kind: ContractKind,
-    value: Option<&str>,
-    network: &str,
-) -> Result<()> {
-    let Some(raw) = value else { return Ok(()) };
+/// Parse the `identity_jwks_roots` address, which may be absent or empty
+/// ("" means "not deployed" in the chain-configurations convention).
+fn parse_roots(value: Option<&str>, network: &str) -> Result<Option<Address>> {
+    let Some(raw) = value else { return Ok(None) };
     if raw.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
-    let address: Address = raw.parse().with_context(|| {
-        format!(
-            "network '{network}': invalid {} address '{raw}'",
-            kind.label()
-        )
+    let address = raw.parse().with_context(|| {
+        format!("network '{network}': invalid identity_jwks_roots address '{raw}'")
     })?;
-    targets.push(Target { kind, address });
-    Ok(())
+    Ok(Some(address))
 }
 
 // ── chain-configurations network files ──────────────────────────────────────
@@ -306,8 +254,6 @@ fn push_target(
 struct NetworkFile {
     network: NetworkFileNetwork,
     #[serde(default)]
-    contracts: NetworkFileContracts,
-    #[serde(default)]
     identity: Option<NetworkFileIdentity>,
 }
 
@@ -318,13 +264,6 @@ struct NetworkFileNetwork {
     rpc_url: String,
 }
 
-/// `[contracts]` — OUTPUT keys over there; empty string = not deployed.
-#[derive(Debug, Clone, Default, Deserialize)]
-struct NetworkFileContracts {
-    #[serde(default)]
-    google_oidc_verifier: String,
-}
-
 /// `[identity]` — absent section = identity stack not wanted.
 #[derive(Debug, Clone, Deserialize)]
 struct NetworkFileIdentity {
@@ -332,10 +271,11 @@ struct NetworkFileIdentity {
     identity_jwks_roots: Option<String>,
 }
 
-/// A network file plus the targets extracted from it.
+/// A network file plus the address extracted from it (`None` when the file
+/// records no deployed `IdentityJwksRoots`).
 struct ParsedNetworkFile {
     network: NetworkFileNetwork,
-    targets: Vec<Target>,
+    identity_jwks_roots: Option<Address>,
 }
 
 impl NetworkFile {
@@ -344,25 +284,16 @@ impl NetworkFile {
             .with_context(|| format!("reading network file {}", path.display()))?;
         let parsed: Self = toml::from_str(&text)
             .with_context(|| format!("parsing network file {}", path.display()))?;
-        let mut targets = Vec::new();
-        push_target(
-            &mut targets,
-            ContractKind::IdentityJwksRoots,
+        let identity_jwks_roots = parse_roots(
             parsed
                 .identity
                 .as_ref()
                 .and_then(|i| i.identity_jwks_roots.as_deref()),
             &parsed.network.name,
         )?;
-        push_target(
-            &mut targets,
-            ContractKind::GoogleOidcVerifier,
-            Some(parsed.contracts.google_oidc_verifier.as_str()),
-            &parsed.network.name,
-        )?;
         Ok(ParsedNetworkFile {
             network: parsed.network,
-            targets,
+            identity_jwks_roots,
         })
     }
 }

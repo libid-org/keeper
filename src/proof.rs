@@ -1,10 +1,12 @@
-//! Obtaining a `JwksRotationProof` — the notarized reading of Google's JWKS.
+//! Obtaining a [`NotarizedSession`] — the notarized reading of Google's JWKS.
 //!
 //! The production path is the real thing: an MPC-TLS session against a
 //! running libid notary's TCP wire port, driven by the notary crate's own
 //! prover-side helpers ([`notary::jwks::prover::notarize_jwks`]). The mock
 //! path exists for end-to-end tests only (see
-//! [`crate::config::KeeperConfig::mock_notary`]).
+//! [`crate::config::KeeperConfig::mock_notary`]). Both hand back the same
+//! record — the section 9.1 bytes and the notary's signature over them —
+//! which is exactly what `IdentityJwksRoots.rotate` takes.
 
 use anyhow::{
     bail,
@@ -12,24 +14,24 @@ use anyhow::{
     Result,
 };
 use libid_crypto::hex_to_signing_key;
-use notary::jwks::{
-    mock::{
+use notary::{
+    jwks::mock::{
         MockProver,
         MockProverConfig,
     },
-    JwksRotationProof,
+    NotarizedSession,
 };
 use tokio::net::TcpStream;
 use tracing::info;
 
 use crate::config::KeeperConfig;
 
-/// Where rotation proofs come from.
+/// Where notarized readings come from.
 #[derive(Debug, Clone)]
 pub enum ProofSource {
     /// A libid notary's TCP wire port (`host:port`).
     Notary(String),
-    /// TEST-ONLY: mock proofs signed with a local key, JWKS fetched over
+    /// TEST-ONLY: mock sessions signed with a local key, JWKS fetched over
     /// plain TLS (optionally from an overridden URL).
     Mock {
         /// Hex secp256k1 signing key.
@@ -66,28 +68,27 @@ impl ProofSource {
     }
 
     /// Obtain one notarized reading of Google's JWKS.
-    pub async fn obtain(&self) -> Result<JwksRotationProof> {
+    pub async fn obtain(&self) -> Result<NotarizedSession> {
         match self {
             Self::Notary(addr) => {
                 info!(notary = %addr, "starting MPC-TLS JWKS notarization");
                 let socket = TcpStream::connect(addr)
                     .await
                     .with_context(|| format!("connecting to notary at {addr}"))?;
-                let response = notary::jwks::prover::notarize_jwks(socket)
+                let session = notary::jwks::prover::notarize_jwks(socket)
                     .await
                     .context("MPC-TLS JWKS notarization failed")?;
                 info!(
-                    claims = response.proof.claims.len(),
-                    timestamp = response.proof.timestamp,
+                    attested_bytes = session.attested_data.len(),
                     "notary signed the JWKS reading"
                 );
-                Ok(response.proof)
+                Ok(session)
             }
             Self::Mock {
                 signing_key,
                 jwks_url,
             } => {
-                info!("building MOCK rotation proof (test seam, no MPC-TLS)");
+                info!("building MOCK notarized session (test seam, no MPC-TLS)");
                 let key = hex_to_signing_key(signing_key)
                     .map_err(|e| anyhow::anyhow!("mock_notary.signing_key: {e}"))?;
                 let mut prover = MockProver::new(
@@ -97,11 +98,11 @@ impl ProofSource {
                         ..MockProverConfig::default()
                     },
                 );
-                let proof = prover
-                    .build_proof()
+                let session = prover
+                    .build_session()
                     .await
-                    .context("mock proof construction failed")?;
-                Ok(proof)
+                    .context("mock session construction failed")?;
+                Ok(session)
             }
         }
     }
