@@ -17,6 +17,7 @@ use base64::{
 use libid_crypto::keccak256;
 use num_bigint::BigUint;
 use serde::Deserialize;
+use tracing::warn;
 
 /// Google's JWKS endpoint — the same URL the notary attests.
 pub const GOOGLE_JWKS_URL: &str = "https://www.googleapis.com/oauth2/v3/certs";
@@ -53,17 +54,29 @@ pub fn parse_google_jwks(body: &[u8]) -> Result<Vec<GoogleKey>> {
     if jwks.keys.is_empty() {
         bail!("Google's JWKS response contains no keys");
     }
-    jwks.keys
-        .iter()
-        .map(|jwk| {
-            Ok(GoogleKey {
+    // A key the contract would refuse is left out of the decision rather than
+    // failing the tick: the contract installs only 2048-bit moduli
+    // (`InvalidModulusLength` otherwise), so classifying such a key as
+    // untrusted would make the keeper submit a rotation that reverts, every
+    // tick, until Google stopped publishing it. Skipping it keeps the live
+    // keys rotating; the warning says which key was ignored and why.
+    let mut keys = Vec::with_capacity(jwks.keys.len());
+    for jwk in &jwks.keys {
+        match modulus_hash(&jwk.n) {
+            Ok(modulus_hash) => keys.push(GoogleKey {
                 kid: jwk.kid.clone(),
                 kid_hash: kid_hash(&jwk.kid),
-                modulus_hash: modulus_hash(&jwk.n)
-                    .with_context(|| format!("kid {}", jwk.kid))?,
-            })
-        })
-        .collect()
+                modulus_hash,
+            }),
+            Err(e) => {
+                warn!(kid = %jwk.kid, error = %e, "ignoring a key the contract would refuse")
+            }
+        }
+    }
+    if keys.is_empty() {
+        bail!("Google's JWKS response contains no key the contract would accept");
+    }
+    Ok(keys)
 }
 
 /// `keccak256(kid)` — matches the contracts' `_processClaim` storage key.
@@ -81,9 +94,17 @@ pub fn kid_hash(kid: &str) -> B256 {
 /// never drift apart.
 pub fn modulus_hash(n_b64url: &str) -> Result<B256> {
     const NUM_LIMBS: usize = 18;
+    /// The one modulus size the contract installs and the circuit verifies.
+    const MODULUS_BYTES: usize = 256;
     let n_bytes = URL_SAFE_NO_PAD
         .decode(n_b64url)
         .context("modulus is not base64url")?;
+    if n_bytes.len() != MODULUS_BYTES {
+        bail!(
+            "modulus is {} bytes, not the {MODULUS_BYTES} the contract accepts",
+            n_bytes.len()
+        );
+    }
     let n = BigUint::from_bytes_be(&n_bytes);
     let mask = (BigUint::from(1u8) << 120u32) - BigUint::from(1u8);
     let mut buf = Vec::with_capacity(NUM_LIMBS * 32);
@@ -177,17 +198,58 @@ mod tests {
         assert_eq!(hex::encode(modulus_hash(n_b64url).unwrap()), expected);
     }
 
+    /// A 2048-bit modulus in base64url, derived from `seed`: 256 bytes encode
+    /// to exactly 342 characters, which is the only shape the contract installs.
+    fn modulus(seed: u8) -> String {
+        let bytes: Vec<u8> = (0..256u16)
+            .map(|i| (i as u8).wrapping_mul(31).wrapping_add(seed) | 0x01)
+            .collect();
+        URL_SAFE_NO_PAD.encode(bytes)
+    }
+
     #[test]
     fn parse_google_jwks_extracts_every_key() {
-        let body = br#"{"keys":[
-            {"alg":"RS256","e":"AQAB","n":"AQAB","kty":"RSA","kid":"k1","use":"sig"},
-            {"use":"sig","kty":"RSA","kid":"k2","alg":"RS256","n":"eyJh","e":"AQAB"}
-        ]}"#;
-        let keys = parse_google_jwks(body).unwrap();
+        let body = format!(
+            r#"{{"keys":[
+            {{"alg":"RS256","e":"AQAB","n":"{}","kty":"RSA","kid":"k1","use":"sig"}},
+            {{"use":"sig","kty":"RSA","kid":"k2","alg":"RS256","n":"{}","e":"AQAB"}}
+        ]}}"#,
+            modulus(3),
+            modulus(89)
+        );
+        let keys = parse_google_jwks(body.as_bytes()).unwrap();
         assert_eq!(keys.len(), 2);
         assert_eq!(keys[0].kid, "k1");
         assert_eq!(keys[1].kid, "k2");
         assert_ne!(keys[0].modulus_hash, keys[1].modulus_hash);
+    }
+
+    /// The contract refuses any modulus that is not 256 bytes, so a key of
+    /// another size must not reach the decision: it is skipped, the others
+    /// still rotate.
+    #[test]
+    fn parse_google_jwks_skips_a_key_the_contract_would_refuse() {
+        let body = format!(
+            r#"{{"keys":[
+            {{"kid":"short","n":"AQAB","e":"AQAB"}},
+            {{"kid":"k2","n":"{}","e":"AQAB"}}
+        ]}}"#,
+            modulus(7)
+        );
+        let keys = parse_google_jwks(body.as_bytes()).unwrap();
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].kid, "k2");
+    }
+
+    #[test]
+    fn parse_google_jwks_rejects_a_set_with_no_acceptable_key() {
+        assert!(parse_google_jwks(br#"{"keys":[{"kid":"short","n":"AQAB"}]}"#).is_err());
+    }
+
+    #[test]
+    fn modulus_hash_rejects_a_modulus_that_is_not_2048_bits() {
+        let err = modulus_hash("AQAB").unwrap_err();
+        assert!(err.to_string().contains("3 bytes"), "{err:#}");
     }
 
     #[test]
