@@ -8,7 +8,7 @@ edition = "2021"
 rust-version = "1.95"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/libid-org/keeper"
-description = "Permissionless keeper that keeps Google JWKS roots fresh on-chain: obtains MPC-TLS notarized readings of Google's JWKS from a libid notary and submits rotate() to IdentityJwksRoots on every configured network, paying the Notary Fee."
+description = "Permissionless keeper that keeps Google's JWT signing keys trusted on chain: obtains MPC-TLS notarized readings of Google's JWKS from a libid notary and submits rotate() to GoogleJwtRoots on every configured network, paying the Notary Fee."
 # A binary + companion library, never a registry crate: it names `notary`
 # and the libid-rs crates (git-only sources), which cargo refuses to publish.
 publish = false
@@ -26,7 +26,7 @@ path = "src/main.rs"
 # Prover-side JWKS machinery: `jwks::prover::notarize_jwks` (the real MPC-TLS
 # round trip against a running notary), `jwks::mock::MockProver` (the
 # plain-TLS test seam), and the `NotarizedSession` record both hand back --
-# the `attestedData`/`proof` pair `IdentityJwksRoots.rotate` takes.
+# the `attestedData`/`proof` pair `GoogleJwtRoots.rotate` takes.
 #
 # A REV, NOT A TAG, AND ON PURPOSE. The JWKS reading became an ordinary
 # notarized session on the notary's `feat/jwks-ceremony-attestation` branch,
@@ -45,14 +45,14 @@ notary = { git = "https://github.com/libid-org/notary", rev = "67dd1fea9bc645299
 # types; `NotarizedSession` is libid-transcript's `AttestationWire`). The rev
 # is the head of libid-rs `fix/origin-form-request-target`: the commit that
 # makes `prover_generic` put `GET /oauth2/v3/certs HTTP/1.1` on the wire,
-# which is the request line `IdentityJwksRoots` pins. Moves with the notary's
+# which is the request line `GoogleJwtRoots` pins. Moves with the notary's
 # pin, never on its own; both return to the v0.3.0 tag once it exists.
 libid-crypto = { git = "https://github.com/libid-org/libid-rs", rev = "391078f2f05d1d3b6bce7c347db3c5f6a0cbe851" }
 libid-signer = { git = "https://github.com/libid-org/libid-rs", rev = "391078f2f05d1d3b6bce7c347db3c5f6a0cbe851" }
 
 # ── contract bindings + deploy helpers ──────────────────────────────────────
 # The registry crate is fine here: it has no tlsn-adjacent types. 0.7.0 is
-# the first release whose `IdentityJwksRoots` verifies through the Notary
+# the first release whose `GoogleJwtRoots` verifies through the Notary
 # Service (`rotate(bytes,bytes) payable`, `quoteRotation()`) and whose
 # artifacts carry `NotaryService`; it embeds forge output that is not in git,
 # so it cannot be taken from the repo before it is published.

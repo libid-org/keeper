@@ -97,9 +97,9 @@ pub struct NetworkEntry {
     /// Inline: JSON-RPC endpoint.
     #[serde(default)]
     pub rpc_url: Option<String>,
-    /// Inline: address of the `IdentityJwksRoots` proxy.
+    /// Inline: address of the `GoogleJwtRoots` proxy.
     #[serde(default)]
-    pub identity_jwks_roots: Option<String>,
+    pub google_jwt_roots: Option<String>,
     /// By reference: path to a chain-configurations network file, relative
     /// to the keeper.toml that names it. Mutually exclusive with the inline
     /// fields above — the file is the source of truth.
@@ -112,8 +112,9 @@ pub struct NetworkEntry {
 
 /// A network after resolution: the contract known, its address parsed.
 ///
-/// One JWKS contract per network: `IdentityJwksRoots`, the naming system's
-/// Google trust list, which verifies a rotation through the Notary Service.
+/// One JWKS contract per network: `GoogleJwtRoots`, the signing keys the
+/// `google/v1` Platform Verifier trusts, which verifies a rotation through
+/// the Notary Service.
 /// The login stack's `GoogleOidcVerifier` used to be a second target; it is
 /// archived with the rest of that product and is not kept fresh any more.
 #[derive(Debug, Clone)]
@@ -124,8 +125,8 @@ pub struct ResolvedNetwork {
     pub rpc_url: String,
     /// Gas signer spec (per-network override, else the global default).
     pub signer: Option<String>,
-    /// The `IdentityJwksRoots` proxy on this network.
-    pub identity_jwks_roots: Address,
+    /// The `GoogleJwtRoots` proxy on this network.
+    pub google_jwt_roots: Address,
 }
 
 impl KeeperConfig {
@@ -180,7 +181,7 @@ impl NetworkEntry {
             Some(file) => {
                 if self.name.is_some()
                     || self.rpc_url.is_some()
-                    || self.identity_jwks_roots.is_some()
+                    || self.google_jwt_roots.is_some()
                 {
                     bail!(
                         "network entry referencing '{}' also sets inline fields — \
@@ -198,7 +199,7 @@ impl NetworkEntry {
                 (
                     parsed.network.name,
                     parsed.network.rpc_url,
-                    parsed.identity_jwks_roots,
+                    parsed.google_jwt_roots,
                 )
             }
             None => {
@@ -209,14 +210,14 @@ impl NetworkEntry {
                 let rpc_url = self.rpc_url.clone().with_context(|| {
                     format!("inline network '{name}' is missing `rpc_url`")
                 })?;
-                let roots = parse_roots(self.identity_jwks_roots.as_deref(), &name)?;
+                let roots = parse_roots(self.google_jwt_roots.as_deref(), &name)?;
                 (name, rpc_url, roots)
             }
         };
         let (name, rpc_url, roots) = resolved;
-        let Some(identity_jwks_roots) = roots else {
+        let Some(google_jwt_roots) = roots else {
             bail!(
-                "network '{name}' names no JWKS contract (set identity_jwks_roots, \
+                "network '{name}' names no JWKS contract (set google_jwt_roots, \
                  or reference a network file with it deployed)"
             );
         };
@@ -224,12 +225,12 @@ impl NetworkEntry {
             name,
             rpc_url,
             signer,
-            identity_jwks_roots,
+            google_jwt_roots,
         })
     }
 }
 
-/// Parse the `identity_jwks_roots` address, which may be absent or empty
+/// Parse the `google_jwt_roots` address, which may be absent or empty
 /// ("" means "not deployed" in the chain-configurations convention).
 fn parse_roots(value: Option<&str>, network: &str) -> Result<Option<Address>> {
     let Some(raw) = value else { return Ok(None) };
@@ -237,7 +238,7 @@ fn parse_roots(value: Option<&str>, network: &str) -> Result<Option<Address>> {
         return Ok(None);
     }
     let address = raw.parse().with_context(|| {
-        format!("network '{network}': invalid identity_jwks_roots address '{raw}'")
+        format!("network '{network}': invalid google_jwt_roots address '{raw}'")
     })?;
     Ok(Some(address))
 }
@@ -268,14 +269,14 @@ struct NetworkFileNetwork {
 #[derive(Debug, Clone, Deserialize)]
 struct NetworkFileIdentity {
     #[serde(default)]
-    identity_jwks_roots: Option<String>,
+    google_jwt_roots: Option<String>,
 }
 
 /// A network file plus the address extracted from it (`None` when the file
-/// records no deployed `IdentityJwksRoots`).
+/// records no deployed `GoogleJwtRoots`).
 struct ParsedNetworkFile {
     network: NetworkFileNetwork,
-    identity_jwks_roots: Option<Address>,
+    google_jwt_roots: Option<Address>,
 }
 
 impl NetworkFile {
@@ -284,16 +285,16 @@ impl NetworkFile {
             .with_context(|| format!("reading network file {}", path.display()))?;
         let parsed: Self = toml::from_str(&text)
             .with_context(|| format!("parsing network file {}", path.display()))?;
-        let identity_jwks_roots = parse_roots(
+        let google_jwt_roots = parse_roots(
             parsed
                 .identity
                 .as_ref()
-                .and_then(|i| i.identity_jwks_roots.as_deref()),
+                .and_then(|i| i.google_jwt_roots.as_deref()),
             &parsed.network.name,
         )?;
         Ok(ParsedNetworkFile {
             network: parsed.network,
-            identity_jwks_roots,
+            google_jwt_roots,
         })
     }
 }

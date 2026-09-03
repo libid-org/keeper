@@ -6,7 +6,7 @@
 //! path exists for end-to-end tests only (see
 //! [`crate::config::KeeperConfig::mock_notary`]). Both hand back the same
 //! record — the section 9.1 bytes and the notary's signature over them —
-//! which is exactly what `IdentityJwksRoots.rotate` takes.
+//! which is exactly what `GoogleJwtRoots.rotate` takes.
 
 use anyhow::{
     bail,

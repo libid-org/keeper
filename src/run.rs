@@ -32,7 +32,7 @@ use crate::{
 /// What one tick did.
 #[derive(Debug, Default)]
 pub struct TickOutcome {
-    /// Networks whose `IdentityJwksRoots` was read successfully.
+    /// Networks whose `GoogleJwtRoots` was read successfully.
     pub networks_read: usize,
     /// Networks that needed a rotation.
     pub rotations_needed: usize,
@@ -100,7 +100,7 @@ pub async fn tick(
         match read_network(config, network, &google_keys).await {
             Ok(reading) => {
                 outcome.networks_read += 1;
-                let contract = network.identity_jwks_roots;
+                let contract = network.google_jwt_roots;
                 if reading.needs_rotation() {
                     outcome.rotations_needed += 1;
                     for (kid, verdict) in &reading.keys {
@@ -165,7 +165,7 @@ pub async fn tick(
             Err(e) => {
                 warn!(
                     network = %network.name,
-                    contract = %network.identity_jwks_roots,
+                    contract = %network.google_jwt_roots,
                     error = %e,
                     "rotation submission failed"
                 );
@@ -176,7 +176,7 @@ pub async fn tick(
     outcome
 }
 
-/// Read one network's `IdentityJwksRoots`.
+/// Read one network's `GoogleJwtRoots`.
 async fn read_network(
     config: &KeeperConfig,
     network: &ResolvedNetwork,
@@ -189,13 +189,13 @@ async fn read_network(
     let now = chain::chain_now(&provider).await?;
     chain::read_roots(
         &provider,
-        network.identity_jwks_roots,
+        network.google_jwt_roots,
         google_keys,
         now,
         config.renewal_threshold_secs,
     )
     .await
-    .with_context(|| format!("reading {}", network.identity_jwks_roots))
+    .with_context(|| format!("reading {}", network.google_jwt_roots))
 }
 
 /// Submit one rotation with the network's gas signer, which also pays the
@@ -220,15 +220,15 @@ async fn submit_to(network: &ResolvedNetwork, calldata: Vec<u8>) -> Result<()> {
         .with_context(|| format!("connecting to {}", network.rpc_url))?;
     info!(
         network = %network.name,
-        contract = %network.identity_jwks_roots,
+        contract = %network.google_jwt_roots,
         sender = %sender,
         "submitting rotate()"
     );
     let (tx_hash, gas_used) =
-        chain::submit_rotation(&provider, network.identity_jwks_roots, calldata).await?;
+        chain::submit_rotation(&provider, network.google_jwt_roots, calldata).await?;
     info!(
         network = %network.name,
-        contract = %network.identity_jwks_roots,
+        contract = %network.google_jwt_roots,
         tx = %tx_hash,
         gas_used,
         "rotate() confirmed"
@@ -268,7 +268,7 @@ pub async fn status(config: &KeeperConfig, networks: &[ResolvedNetwork]) -> Resu
                 println!(
                     "{:<16} {} => {}",
                     network.name,
-                    network.identity_jwks_roots,
+                    network.google_jwt_roots,
                     if reading.needs_rotation() {
                         "NEEDS ROTATION"
                     } else {

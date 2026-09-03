@@ -1,6 +1,6 @@
 //! On-chain reads and the rotation submission.
 //!
-//! The one target is `IdentityJwksRoots`. Trust is by MODULUS:
+//! The one target is `GoogleJwtRoots`. Trust is by MODULUS:
 //! `trustedHashExpiresAt(modulusHash)` is what `GooglePlatformVerifier` reads
 //! (the JWT circuit does not expose `kid`), so it is what the keeper reads
 //! too. A rotation is `rotate(attestedData, proof)` — the notarized session
@@ -34,7 +34,7 @@ use anyhow::{
     Context,
     Result,
 };
-use libid_contracts::bindings::identity::IdentityJwksRoots;
+use libid_contracts::bindings::ceremony::GoogleJwtRoots;
 use notary::NotarizedSession;
 use tracing::info;
 
@@ -44,7 +44,7 @@ use crate::decision::{
     KeyVerdict,
 };
 
-/// The verdicts for one `IdentityJwksRoots`, one entry per live Google key.
+/// The verdicts for one `GoogleJwtRoots`, one entry per live Google key.
 #[derive(Debug, Clone)]
 pub struct RootsReading {
     /// `(kid, verdict)` for every key Google currently publishes.
@@ -69,7 +69,7 @@ pub async fn chain_now<P: Provider>(provider: &P) -> Result<u64> {
     Ok(block.header.timestamp)
 }
 
-/// Read the trust state of the `IdentityJwksRoots` at `roots` for every live
+/// Read the trust state of the `GoogleJwtRoots` at `roots` for every live
 /// Google key and classify it.
 pub async fn read_roots<P: Provider>(
     provider: &P,
@@ -78,7 +78,7 @@ pub async fn read_roots<P: Provider>(
     now: u64,
     threshold: u64,
 ) -> Result<RootsReading> {
-    let contract = IdentityJwksRoots::new(roots, provider);
+    let contract = GoogleJwtRoots::new(roots, provider);
     let mut keys = Vec::with_capacity(google_keys.len());
     for key in google_keys {
         let expiry = contract
@@ -109,7 +109,7 @@ fn to_expiry(expiry: U256) -> Option<u64> {
 /// record goes in as the notary encoded it: the signature is over exactly
 /// those bytes, and the contract derives the notary key from the pair alone.
 pub fn rotate_calldata(session: &NotarizedSession) -> Vec<u8> {
-    IdentityJwksRoots::rotateCall {
+    GoogleJwtRoots::rotateCall {
         attestedData: Bytes::from(session.attested_data.clone()),
         proof: Bytes::from(session.notary_signature.clone()),
     }
@@ -129,7 +129,7 @@ pub async fn submit_rotation<P: Provider>(
     roots: Address,
     calldata: Vec<u8>,
 ) -> Result<(TxHash, u64)> {
-    let fee = IdentityJwksRoots::new(roots, provider)
+    let fee = GoogleJwtRoots::new(roots, provider)
         .quoteRotation()
         .call()
         .await
@@ -172,9 +172,9 @@ mod tests {
         };
 
         let calldata = rotate_calldata(&session);
-        assert_eq!(&calldata[..4], IdentityJwksRoots::rotateCall::SELECTOR);
+        assert_eq!(&calldata[..4], GoogleJwtRoots::rotateCall::SELECTOR);
 
-        let decoded = IdentityJwksRoots::rotateCall::abi_decode(&calldata).unwrap();
+        let decoded = GoogleJwtRoots::rotateCall::abi_decode(&calldata).unwrap();
         assert_eq!(
             decoded.attestedData.as_ref(),
             session.attested_data.as_slice()

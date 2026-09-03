@@ -2,7 +2,7 @@
 //! file, and the full keeper loop against a real chain.
 //!
 //! The end-to-end test is everything but MPC-TLS itself: a real Anvil node,
-//! the real `NotaryService` / `IdentityJwksRoots` contracts deployed from
+//! the real `NotaryService` / `GoogleJwtRoots` contracts deployed from
 //! libid-contracts' embedded artifacts, a local HTTP server standing in for
 //! Google's JWKS endpoint (serving Google's real body), and the notary
 //! crate's mock prover (which signs the exact record a real MPC-TLS session
@@ -29,9 +29,9 @@ use keeper::{
 };
 use libid_contracts::{
     artifacts::Artifacts,
-    bindings::{
-        ceremony::NotaryService,
-        identity::IdentityJwksRoots,
+    bindings::ceremony::{
+        GoogleJwtRoots,
+        NotaryService,
     },
     deploy::deploy_behind_proxy,
 };
@@ -111,7 +111,7 @@ fn config_refuses_notary_url_alongside_mock_notary() {
          [[networks]]\n\
          name = \"n\"\n\
          rpc_url = \"http://127.0.0.1:1\"\n\
-         identity_jwks_roots = \"0x69cc7c69b39ada71ce908d432868d5ef9a6a6d0e\"\n",
+         google_jwt_roots = \"0x69cc7c69b39ada71ce908d432868d5ef9a6a6d0e\"\n",
     );
     let err = KeeperConfig::load(&path).unwrap_err();
     assert!(err.to_string().contains("test seam"), "{err:#}");
@@ -124,7 +124,7 @@ fn config_refuses_duplicate_network_names() {
     let entry = "[[networks]]\n\
                  name = \"n\"\n\
                  rpc_url = \"http://127.0.0.1:1\"\n\
-                 identity_jwks_roots = \"0x69cc7c69b39ada71ce908d432868d5ef9a6a6d0e\"\n";
+                 google_jwt_roots = \"0x69cc7c69b39ada71ce908d432868d5ef9a6a6d0e\"\n";
     let path = write_keeper_toml(dir.path(), &format!("{entry}{entry}"));
     let err = KeeperConfig::load(&path).unwrap_err();
     assert!(
@@ -203,11 +203,11 @@ async fn keeper_rotates_the_roots_then_reaches_steady_state() {
     )
     .await
     .unwrap();
-    let jwks_roots = deploy_behind_proxy(
+    let jwt_roots = deploy_behind_proxy(
         &provider,
         &artifacts,
-        "IdentityJwksRoots",
-        &IdentityJwksRoots::initializeCall {
+        "GoogleJwtRoots",
+        &GoogleJwtRoots::initializeCall {
             owner_: deployer,
             notary_: notary_service,
         },
@@ -228,7 +228,7 @@ async fn keeper_rotates_the_roots_then_reaches_steady_state() {
              [[networks]]\n\
              name = \"anvil\"\n\
              rpc_url = \"{rpc}\"\n\
-             identity_jwks_roots = \"{jwks_roots}\"\n",
+             google_jwt_roots = \"{jwt_roots}\"\n",
             rpc = anvil.endpoint(),
         ),
     );
@@ -236,7 +236,7 @@ async fn keeper_rotates_the_roots_then_reaches_steady_state() {
 
     let google_keys = decision::parse_google_jwks(GOOGLE_BODY.as_bytes()).unwrap();
     assert_eq!(google_keys.len(), 2, "Google publishes two keys today");
-    let roots = IdentityJwksRoots::new(jwks_roots, &provider);
+    let roots = GoogleJwtRoots::new(jwt_roots, &provider);
     assert_eq!(roots.quoteRotation().call().await.unwrap(), fee);
     let service_balance_before = provider.get_balance(notary_service).await.unwrap();
 
