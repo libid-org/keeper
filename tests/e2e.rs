@@ -269,19 +269,18 @@ async fn keeper_rotates_the_roots_then_reaches_steady_state() {
             .await
             .unwrap();
         assert!(expiry > U256::ZERO, "modulus of {} not trusted", key.kid);
-        let modulus = roots.modulusOfKid(key.kid_hash).call().await.unwrap();
-        assert_eq!(
-            modulus, key.modulus_hash,
-            "kid {} modulus mismatch",
-            key.kid
-        );
     }
+    // The reading became the current generation, whole: every key Google
+    // served, and nothing before it.
+    let generations = roots.currentKeys().call().await.unwrap();
+    assert_eq!(generations.current.moduli.len(), google_keys.len());
+    assert!(generations.previous.moduli.is_empty());
     assert!(!roots.needsRotation().call().await.unwrap());
     // The Notary Fee went to the Notary Service — exactly once, exactly whole.
     let service_balance_after = provider.get_balance(notary_service).await.unwrap();
     assert_eq!(service_balance_after - service_balance_before, fee);
 
-    // ── steady state: freshly stamped 30-day TTLs are beyond the 7-day
+    // ── steady state: a reading lifetime of 30 days is beyond the 7-day
     // threshold, so the next tick reads everything and submits nothing ──────
     let outcome = run::tick(&config, &networks, false).await;
     assert_eq!(outcome.networks_read, 1);

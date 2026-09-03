@@ -8,13 +8,13 @@
 //! Fee attached: the contract forwards `msg.value` whole to the Notary
 //! Service, which refuses anything but the exact fee.
 //!
-//! The contract also exposes `currentRoots()`, `freshestObservedAt()` and
-//! `needsRotation()`. `currentRoots()` could collapse the per-key reads below
-//! into one call. `needsRotation()` is NOT a substitute for the per-key
-//! verdicts: it is contract-side only (it cannot see Google's live set, so a
-//! freshly published kid does not trip it while an older key still has
-//! runway) and its 7-day runway is fixed where `renewal_threshold_secs` is
-//! configurable — so the decision stays here.
+//! The contract keeps two generations of Google's key set (the latest
+//! reading and the one before it) and exposes them as `currentKeys()`, with
+//! `freshestObservedAt()` and `needsRotation()` beside them. `needsRotation()`
+//! is NOT a substitute for the per-key verdicts: it is contract-side only (it
+//! cannot see Google's live set, so a freshly published key does not trip it
+//! while the current reading still has runway) and its 7-day runway is fixed
+//! where `renewal_threshold_secs` is configurable — so the decision stays here.
 
 use alloy::{
     eips::BlockNumberOrTag,

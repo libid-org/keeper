@@ -22,16 +22,14 @@ use tracing::warn;
 /// Google's JWKS endpoint — the same URL the notary attests.
 pub const GOOGLE_JWKS_URL: &str = "https://www.googleapis.com/oauth2/v3/certs";
 
-/// One key from Google's live JWKS, with the hashes the contracts key
-/// their storage by.
+/// One key from Google's live JWKS, with the hash the contract keys trust by.
 #[derive(Debug, Clone)]
 pub struct GoogleKey {
-    /// Key id, as published.
+    /// Key id, as published. For logs and the status table; the contract
+    /// keys nothing by it.
     pub kid: String,
-    /// `keccak256(kid)` — `modulusOfKid` / `expiresAtKid` storage key.
-    pub kid_hash: B256,
     /// keccak of the 18×120-bit limb rendering of `n` — what
-    /// `trustedHashExpiresAt` is keyed by and `modulusOfKid` stores.
+    /// `trustedHashExpiresAt` is keyed by and what the circuit exposes.
     pub modulus_hash: B256,
 }
 
@@ -65,7 +63,6 @@ pub fn parse_google_jwks(body: &[u8]) -> Result<Vec<GoogleKey>> {
         match modulus_hash(&jwk.n) {
             Ok(modulus_hash) => keys.push(GoogleKey {
                 kid: jwk.kid.clone(),
-                kid_hash: kid_hash(&jwk.kid),
                 modulus_hash,
             }),
             Err(e) => {
@@ -77,11 +74,6 @@ pub fn parse_google_jwks(body: &[u8]) -> Result<Vec<GoogleKey>> {
         bail!("Google's JWKS response contains no key the contract would accept");
     }
     Ok(keys)
-}
-
-/// `keccak256(kid)` — matches the contracts' `_processClaim` storage key.
-pub fn kid_hash(kid: &str) -> B256 {
-    B256::from(keccak256(kid.as_bytes()))
 }
 
 /// keccak256 of the modulus rendered as 18 little-endian 120-bit limbs, each
@@ -177,15 +169,6 @@ pub fn key_verdict(trusted_until: Option<u64>, now: u64, threshold: u64) -> KeyV
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// `keccak256("oidc-1")`, precomputed via `cast keccak "oidc-1"` — the
-    /// same vector the original monorepo's rotation listener asserted
-    /// against.
-    #[test]
-    fn kid_hash_matches_cast_keccak() {
-        let expected = "22f02000da44e4b96e6ba14598619cce801d51d062fe5392dc68ad5fbd641b86";
-        assert_eq!(hex::encode(kid_hash("oidc-1")), expected);
-    }
 
     /// The vendored limb math is byte-identical to the origin implementation
     /// (the original monorepo's `oidc-core::compute_modulus_hash`): both the

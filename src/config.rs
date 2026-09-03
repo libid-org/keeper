@@ -25,7 +25,7 @@ use anyhow::{
 use serde::Deserialize;
 
 /// Default poll interval: once an hour. Google rotates roughly weekly and
-/// the contracts stamp a 30-day TTL, so an hour is comfortably tight.
+/// a reading is trusted for 30 days, so an hour is comfortably tight.
 const DEFAULT_POLL_INTERVAL_SECS: u64 = 60 * 60;
 
 /// Default renewal threshold: rotate when a trusted key expires within seven
