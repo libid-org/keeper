@@ -3,12 +3,12 @@ name = "keeper"
 version = "0.2.0"
 edition = "2021"
 # Inherited floor: the notary lib dependency pulls the `tlsn` MPC graph
-# (unstable `cfg_select!` before 1.94) and the AWS SDK crates via
+# (TLSNotary alpha.15's `mpz` crates declare 1.95) and the AWS SDK crates via
 # libid-signer declare 1.94.1.
-rust-version = "1.94.1"
+rust-version = "1.95"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/libid-org/keeper"
-description = "Permissionless keeper that keeps Google JWKS roots fresh on-chain: obtains MPC-TLS notarized readings of Google's JWKS from a libid notary and submits rotate() to the JWKS contracts on every configured network."
+description = "Permissionless keeper that keeps Google's JWT signing keys trusted on chain: obtains MPC-TLS notarized readings of Google's JWKS from a libid notary and submits rotate() to GoogleJwtRoots on every configured network, paying the Notary Fee."
 # A binary + companion library, never a registry crate: it names `notary`
 # and the libid-rs crates (git-only sources), which cargo refuses to publish.
 publish = false
@@ -25,21 +25,38 @@ path = "src/main.rs"
 # ── the notary service's companion library ──────────────────────────────────
 # Prover-side JWKS machinery: `jwks::prover::notarize_jwks` (the real MPC-TLS
 # round trip against a running notary), `jwks::mock::MockProver` (the
-# plain-TLS test seam), and the `JwksRotationProof` wire type. The tag pins
-# the exact tlsn/libid-rs graph the notary released with.
-notary = { git = "https://github.com/libid-org/notary", tag = "v0.2.0" }
+# plain-TLS test seam), and the `NotarizedSession` record both hand back --
+# the `attestedData`/`proof` pair `GoogleJwtRoots.rotate` takes.
+#
+# A REV, NOT A TAG, AND ON PURPOSE. The JWKS reading became an ordinary
+# notarized session on the notary's `feat/jwks-ceremony-attestation` branch,
+# stacked on `feat/ws-attestations` (#6) on `#3`, and no notary release
+# carries it yet. This returns to `tag = "v0.3.0"` (or whatever the stack
+# releases as) the moment that tag is cut -- and it must, before this is
+# released: a rev is reachable only while the branch that carries it is, and
+# squash-merging the PR would strand it.
+notary = { git = "https://github.com/libid-org/notary", rev = "67dd1fea9bc6452996c9ac34fd5c89ec88f9ead2" }
 
 # ── libid-rs shared crates ──────────────────────────────────────────────────
-# Same git tag as the notary dependency pins, so cargo unifies them with the
-# copies arriving through `notary` — mixing the crates.io releases with the
-# git copies would put two incompatible versions of the same types in the
-# graph (libid-tlsn is git-only and exposes sibling-crate types).
-libid-crypto = { git = "https://github.com/libid-org/libid-rs", tag = "v0.2.0" }
-libid-signer = { git = "https://github.com/libid-org/libid-rs", tag = "v0.2.0" }
+# The SAME git rev the notary pins for its libid-rs crates, so cargo unifies
+# these with the copies arriving through `notary` -- mixing the crates.io
+# releases with the git copies would put two incompatible versions of the
+# same types in the graph (libid-tlsn is git-only and exposes sibling-crate
+# types; `NotarizedSession` is libid-transcript's `AttestationWire`). The rev
+# is the head of libid-rs `fix/origin-form-request-target`: the commit that
+# makes `prover_generic` put `GET /oauth2/v3/certs HTTP/1.1` on the wire,
+# which is the request line `GoogleJwtRoots` pins. Moves with the notary's
+# pin, never on its own; both return to the v0.3.0 tag once it exists.
+libid-crypto = { git = "https://github.com/libid-org/libid-rs", rev = "391078f2f05d1d3b6bce7c347db3c5f6a0cbe851" }
+libid-signer = { git = "https://github.com/libid-org/libid-rs", rev = "391078f2f05d1d3b6bce7c347db3c5f6a0cbe851" }
 
 # ── contract bindings + deploy helpers ──────────────────────────────────────
-# The registry crate is fine here: it has no tlsn-adjacent types.
-libid-contracts = "0.3.0"
+# The registry crate is fine here: it has no tlsn-adjacent types. 0.7.0 is
+# the first release whose `GoogleJwtRoots` verifies through the Notary
+# Service (`rotate(bytes,bytes) payable`, `quoteRotation()`) and whose
+# artifacts carry `NotaryService`; it embeds forge output that is not in git,
+# so it cannot be taken from the repo before it is published.
+libid-contracts = "0.7.0"
 alloy = { version = "1", features = [
     "contract",
     "providers",
@@ -53,8 +70,6 @@ anyhow = "1"
 base64 = "0.22"
 clap = { version = "4", features = ["derive", "env"] }
 hex = "0.4"
-# The mock prover signs with a caller-provided k256 key.
-k256 = { version = "0.13", features = ["ecdsa", "sha256"] }
 num-bigint = "0.4"
 # Plain-HTTPS fetch of Google's live JWKS (the cheap poll; notarization
 # happens only when a rotation is actually needed).
@@ -79,3 +94,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 [dev-dependencies]
 alloy = { version = "1", features = ["node-bindings"] }
 tempfile = "3"
+
+[patch."https://github.com/tlsnotary/tlsn"]
+# The notary's own patch, repeated here because `[patch]` is read from the
+# ROOT manifest only: a dependent of the notary does not inherit it, and
+# without it the keeper's prover would run upstream alpha.15 against a notary
+# running the patched tree. WIP: TLSNotary #1178 reclaims the channel and
+# #1179 preserves hash-opening order for multi-range commitments. Return to a
+# release tag when both ship -- in lockstep with the notary.
+tlsn = { git = "https://github.com/libid-org/tlsn", rev = "816cebcf89480ebf55f58983ec6bab176ea08345" }
