@@ -29,13 +29,14 @@ path = "src/main.rs"
 # the `attestedData`/`proof` pair `GoogleJwtRoots.rotate` takes.
 #
 # A REV, NOT A TAG, AND ON PURPOSE. The JWKS reading became an ordinary
-# notarized session on the notary's `feat/jwks-ceremony-attestation` branch,
-# stacked on `feat/ws-attestations` (#6) on `#3`, and no notary release
-# carries it yet. This returns to `tag = "v0.3.0"` (or whatever the stack
+# notarized session on the notary's `feat/jwks-ceremony-attestation` branch
+# (#7), stacked on `feat/ws-attestations` (#6) on `#3`; the rev is the head of
+# notary#8 on top of it, which moves the notary's libid-rs pins to the same
+# commit as the ones below. No notary release carries any of it yet. This returns to `tag = "v0.3.0"` (or whatever the stack
 # releases as) the moment that tag is cut -- and it must, before this is
 # released: a rev is reachable only while the branch that carries it is, and
 # squash-merging the PR would strand it.
-notary = { git = "https://github.com/libid-org/notary", rev = "67dd1fea9bc6452996c9ac34fd5c89ec88f9ead2" }
+notary = { git = "https://github.com/libid-org/notary", rev = "cbf858a8e54861d2ae6549c8cd22e71266ef3929" }
 
 # ── libid-rs shared crates ──────────────────────────────────────────────────
 # The SAME git rev the notary pins for its libid-rs crates, so cargo unifies
@@ -43,12 +44,13 @@ notary = { git = "https://github.com/libid-org/notary", rev = "67dd1fea9bc645299
 # releases with the git copies would put two incompatible versions of the
 # same types in the graph (libid-tlsn is git-only and exposes sibling-crate
 # types; `NotarizedSession` is libid-transcript's `AttestationWire`). The rev
-# is the head of libid-rs `fix/origin-form-request-target`: the commit that
-# makes `prover_generic` put `GET /oauth2/v3/certs HTTP/1.1` on the wire,
-# which is the request line `GoogleJwtRoots` pins. Moves with the notary's
-# pin, never on its own; both return to the v0.3.0 tag once it exists.
-libid-crypto = { git = "https://github.com/libid-org/libid-rs", rev = "391078f2f05d1d3b6bce7c347db3c5f6a0cbe851" }
-libid-signer = { git = "https://github.com/libid-org/libid-rs", rev = "391078f2f05d1d3b6bce7c347db3c5f6a0cbe851" }
+# is the head of libid-rs `feat/ceremony-constructions` (PR #2), the same
+# commit the notary pins: it carries the origin-form request line
+# `GoogleJwtRoots` pins (#5) and the reveal-layout fixes (#8, #9). Moves with
+# the notary's pin, never on its own; both return to the v0.3.0 tag once it
+# exists.
+libid-crypto = { git = "https://github.com/libid-org/libid-rs", rev = "cc40b0c449cedcd8da2868da020c09ba7951bb9e" }
+libid-signer = { git = "https://github.com/libid-org/libid-rs", rev = "cc40b0c449cedcd8da2868da020c09ba7951bb9e" }
 
 # ── contract bindings + deploy helpers ──────────────────────────────────────
 # The registry crate is fine here: it has no tlsn-adjacent types. 0.7.0 is

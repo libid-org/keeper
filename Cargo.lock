@@ -3955,7 +3955,7 @@ checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 [[package]]
 name = "libid-ceremony"
 version = "0.3.0"
-source = "git+https://github.com/libid-org/libid-rs?rev=391078f2f05d1d3b6bce7c347db3c5f6a0cbe851#391078f2f05d1d3b6bce7c347db3c5f6a0cbe851"
+source = "git+https://github.com/libid-org/libid-rs?rev=cc40b0c449cedcd8da2868da020c09ba7951bb9e#cc40b0c449cedcd8da2868da020c09ba7951bb9e"
 dependencies = [
  "bincode 2.0.1",
  "libid-crypto",
@@ -3979,7 +3979,7 @@ dependencies = [
 [[package]]
 name = "libid-crypto"
 version = "0.3.0"
-source = "git+https://github.com/libid-org/libid-rs?rev=391078f2f05d1d3b6bce7c347db3c5f6a0cbe851#391078f2f05d1d3b6bce7c347db3c5f6a0cbe851"
+source = "git+https://github.com/libid-org/libid-rs?rev=cc40b0c449cedcd8da2868da020c09ba7951bb9e#cc40b0c449cedcd8da2868da020c09ba7951bb9e"
 dependencies = [
  "hex",
  "k256",
@@ -3991,7 +3991,7 @@ dependencies = [
 [[package]]
 name = "libid-signer"
 version = "0.3.0"
-source = "git+https://github.com/libid-org/libid-rs?rev=391078f2f05d1d3b6bce7c347db3c5f6a0cbe851#391078f2f05d1d3b6bce7c347db3c5f6a0cbe851"
+source = "git+https://github.com/libid-org/libid-rs?rev=cc40b0c449cedcd8da2868da020c09ba7951bb9e#cc40b0c449cedcd8da2868da020c09ba7951bb9e"
 dependencies = [
  "alloy",
  "aws-config",
@@ -4003,7 +4003,7 @@ dependencies = [
 [[package]]
 name = "libid-tlsn"
 version = "0.3.0"
-source = "git+https://github.com/libid-org/libid-rs?rev=391078f2f05d1d3b6bce7c347db3c5f6a0cbe851#391078f2f05d1d3b6bce7c347db3c5f6a0cbe851"
+source = "git+https://github.com/libid-org/libid-rs?rev=cc40b0c449cedcd8da2868da020c09ba7951bb9e#cc40b0c449cedcd8da2868da020c09ba7951bb9e"
 dependencies = [
  "http-body-util",
  "hyper 1.11.0",
@@ -4021,7 +4021,7 @@ dependencies = [
 [[package]]
 name = "libid-transcript"
 version = "0.3.0"
-source = "git+https://github.com/libid-org/libid-rs?rev=391078f2f05d1d3b6bce7c347db3c5f6a0cbe851#391078f2f05d1d3b6bce7c347db3c5f6a0cbe851"
+source = "git+https://github.com/libid-org/libid-rs?rev=cc40b0c449cedcd8da2868da020c09ba7951bb9e#cc40b0c449cedcd8da2868da020c09ba7951bb9e"
 dependencies = [
  "httparse",
  "serde",
@@ -4542,7 +4542,7 @@ checksum = "2bf50223579dc7cdcfb3bfcacf7069ff68243f8c363f62ffa99cf000a6b9c451"
 [[package]]
 name = "notary"
 version = "0.3.0"
-source = "git+https://github.com/libid-org/notary?rev=67dd1fea9bc6452996c9ac34fd5c89ec88f9ead2#67dd1fea9bc6452996c9ac34fd5c89ec88f9ead2"
+source = "git+https://github.com/libid-org/notary?rev=cbf858a8e54861d2ae6549c8cd22e71266ef3929#cbf858a8e54861d2ae6549c8cd22e71266ef3929"
 dependencies = [
  "anyhow",
  "axum",
