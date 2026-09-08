@@ -1,23 +1,20 @@
 //! On-chain reads and the rotation submission.
 //!
-//! Both target contracts expose the identical permissionless
-//! `rotate(NotarizedJwksProof, JwkClaim[])`; they differ only in how trust
-//! is read back:
+//! The one target is `GoogleJwtRoots`. Trust is by MODULUS:
+//! `trustedHashExpiresAt(modulusHash)` is what `GooglePlatformVerifier` reads
+//! (the JWT circuit does not expose `kid`), so it is what the keeper reads
+//! too. A rotation is `rotate(attestedData, proof)` — the notarized session
+//! as the notary handed it over, nothing re-encoded — sent with the Notary
+//! Fee attached: the contract forwards `msg.value` whole to the Notary
+//! Service, which refuses anything but the exact fee.
 //!
-//! * `IdentityJwksRoots` — trust is by MODULUS: `trustedHashExpiresAt`
-//!   (the JWT circuit does not expose `kid`).
-//! * `GoogleOidcVerifier` — trust is by KID: `modulusOfKid` +
-//!   `expiresAtKid`; a kid carrying a different modulus than Google's live
-//!   one counts as untrusted.
-//!
-//! FOLLOW-UP (libid-contracts 0.3.1): both contracts grow keeper-facing
-//! views — `currentRoots()`, `freshestObservedAt()`, `needsRotation()`.
-//! `currentRoots()` can collapse the per-key reads below into one call per
-//! contract once that release is picked up. `needsRotation()` is NOT a
-//! substitute for the per-key verdicts: it is contract-side only (it cannot
-//! see Google's live set, so a freshly published kid does not trip it while
-//! an older key still has runway) and its 7-day runway is fixed where
-//! `renewal_threshold_secs` is configurable — so the decision stays here.
+//! The contract keeps two generations of Google's key set (the latest
+//! reading and the one before it) and exposes them as `currentKeys()`, with
+//! `freshestObservedAt()` and `needsRotation()` beside them. `needsRotation()`
+//! is NOT a substitute for the per-key verdicts: it is contract-side only (it
+//! cannot see Google's live set, so a freshly published key does not trip it
+//! while the current reading still has runway) and its 7-day runway is fixed
+//! where `renewal_threshold_secs` is configurable — so the decision stays here.
 
 use alloy::{
     eips::BlockNumberOrTag,
@@ -25,7 +22,6 @@ use alloy::{
     primitives::{
         Address,
         Bytes,
-        FixedBytes,
         TxHash,
         U256,
     },
@@ -38,41 +34,31 @@ use anyhow::{
     Context,
     Result,
 };
-use libid_contracts::bindings::{
-    identity::IdentityJwksRoots,
-    oidc::GoogleOidcVerifier,
-};
-use notary::jwks::JwksRotationProof;
+use libid_contracts::bindings::ceremony::GoogleJwtRoots;
+use notary::NotarizedSession;
+use tracing::info;
 
-use crate::{
-    config::{
-        ContractKind,
-        Target,
-    },
-    decision::{
-        key_verdict,
-        GoogleKey,
-        KeyVerdict,
-    },
+use crate::decision::{
+    key_verdict,
+    GoogleKey,
+    KeyVerdict,
 };
 
-/// The verdicts for one target contract, one entry per live Google key.
+/// The verdicts for one `GoogleJwtRoots`, one entry per live Google key.
 #[derive(Debug, Clone)]
-pub struct TargetReading {
-    /// The contract read.
-    pub target: Target,
+pub struct RootsReading {
     /// `(kid, verdict)` for every key Google currently publishes.
     pub keys: Vec<(String, KeyVerdict)>,
 }
 
-impl TargetReading {
+impl RootsReading {
     /// True when any key justifies a rotation.
     pub fn needs_rotation(&self) -> bool {
         self.keys.iter().any(|(_, v)| v.needs_rotation())
     }
 }
 
-/// The latest block timestamp — the clock the contracts compare expiries
+/// The latest block timestamp — the clock the contract compares expiries
 /// against, so decisions use it instead of the keeper host's wall clock.
 pub async fn chain_now<P: Provider>(provider: &P) -> Result<u64> {
     let block = provider
@@ -83,60 +69,33 @@ pub async fn chain_now<P: Provider>(provider: &P) -> Result<u64> {
     Ok(block.header.timestamp)
 }
 
-/// Read one target's trust state for every live Google key and classify it.
-pub async fn read_target<P: Provider>(
+/// Read the trust state of the `GoogleJwtRoots` at `roots` for every live
+/// Google key and classify it.
+pub async fn read_roots<P: Provider>(
     provider: &P,
-    target: &Target,
+    roots: Address,
     google_keys: &[GoogleKey],
     now: u64,
     threshold: u64,
-) -> Result<TargetReading> {
+) -> Result<RootsReading> {
+    let contract = GoogleJwtRoots::new(roots, provider);
     let mut keys = Vec::with_capacity(google_keys.len());
     for key in google_keys {
-        let trusted_until = match target.kind {
-            ContractKind::IdentityJwksRoots => {
-                let roots = IdentityJwksRoots::new(target.address, provider);
-                let expiry = roots
-                    .trustedHashExpiresAt(key.modulus_hash)
-                    .call()
-                    .await
-                    .with_context(|| {
-                        format!("trustedHashExpiresAt({}) failed", key.kid)
-                    })?;
-                to_expiry(expiry)
-            }
-            ContractKind::GoogleOidcVerifier => {
-                let verifier = GoogleOidcVerifier::new(target.address, provider);
-                let on_chain_modulus =
-                    verifier
-                        .modulusOfKid(key.kid_hash)
-                        .call()
-                        .await
-                        .with_context(|| format!("modulusOfKid({}) failed", key.kid))?;
-                if on_chain_modulus != key.modulus_hash {
-                    // Never rotated in, or the kid now carries a different
-                    // modulus — either way the live key is not trusted.
-                    None
-                } else {
-                    let expiry = verifier
-                        .expiresAtKid(key.kid_hash)
-                        .call()
-                        .await
-                        .with_context(|| format!("expiresAtKid({}) failed", key.kid))?;
-                    to_expiry(expiry)
-                }
-            }
-        };
-        keys.push((key.kid.clone(), key_verdict(trusted_until, now, threshold)));
+        let expiry = contract
+            .trustedHashExpiresAt(key.modulus_hash)
+            .call()
+            .await
+            .with_context(|| format!("trustedHashExpiresAt({}) failed", key.kid))?;
+        keys.push((
+            key.kid.clone(),
+            key_verdict(to_expiry(expiry), now, threshold),
+        ));
     }
-    Ok(TargetReading {
-        target: target.clone(),
-        keys,
-    })
+    Ok(RootsReading { keys })
 }
 
 /// Collapse a U256 expiry to the `Option<u64>` the verdict works over. Zero
-/// is the contracts' "not trusted" sentinel; anything beyond u64 is treated
+/// is the contract's "not trusted" sentinel; anything beyond u64 is treated
 /// as far-future.
 fn to_expiry(expiry: U256) -> Option<u64> {
     if expiry.is_zero() {
@@ -146,58 +105,39 @@ fn to_expiry(expiry: U256) -> Option<u64> {
     }
 }
 
-/// ABI-encode `rotate(proof, claims)` from a notary wire proof. Encoded via
-/// the `IdentityJwksRoots` bindings; the `GoogleOidcVerifier` ABI is
-/// identical (same selector, same tuple layout), so one encoding serves both
-/// targets.
-pub fn rotate_calldata(proof: &JwksRotationProof) -> Vec<u8> {
-    let sol_proof = IdentityJwksRoots::NotarizedJwksProof {
-        notarySignature: Bytes::from(proof.notary_signature.clone()),
-        domainHash: FixedBytes::from(proof.domain_hash),
-        clientRandom: FixedBytes::from(proof.client_random),
-        serverRandom: FixedBytes::from(proof.server_random),
-        serverEphemeralKey: Bytes::from(proof.server_ephemeral_key.clone()),
-        transcriptRoot: FixedBytes::from(proof.transcript_root),
-        timestamp: U256::from(proof.timestamp),
-        domainPath: proof
-            .domain_path
-            .iter()
-            .copied()
-            .map(FixedBytes::from)
-            .collect(),
-        endpointPath: proof
-            .endpoint_path
-            .iter()
-            .copied()
-            .map(FixedBytes::from)
-            .collect(),
-    };
-    let sol_claims: Vec<IdentityJwksRoots::JwkClaim> = proof
-        .claims
-        .iter()
-        .map(|c| IdentityJwksRoots::JwkClaim {
-            jwkBytes: Bytes::from(c.jwk_bytes.clone()),
-            jwkPath: c.jwk_path.iter().copied().map(FixedBytes::from).collect(),
-            kid: Bytes::from(c.kid.as_bytes().to_vec()),
-            nB64url: Bytes::from(c.n_b64url.as_bytes().to_vec()),
-        })
-        .collect();
-    IdentityJwksRoots::rotateCall {
-        proof: sol_proof,
-        claims: sol_claims,
+/// ABI-encode `rotate(attestedData, proof)` from a notarized session. The
+/// record goes in as the notary encoded it: the signature is over exactly
+/// those bytes, and the contract derives the notary key from the pair alone.
+pub fn rotate_calldata(session: &NotarizedSession) -> Vec<u8> {
+    GoogleJwtRoots::rotateCall {
+        attestedData: Bytes::from(session.attested_data.clone()),
+        proof: Bytes::from(session.notary_signature.clone()),
     }
     .abi_encode()
 }
 
-/// Submit `rotate(...)` and wait for the receipt. Returns the transaction
-/// hash and gas used; errors when the transaction reverts.
+/// Submit `rotate(...)` to `roots` with the Notary Fee attached and wait for
+/// the receipt. Returns the transaction hash and gas used; errors when the
+/// transaction reverts.
+///
+/// The fee is quoted right before sending, not at read time: `rotate` takes
+/// exactly `quoteRotation()` (the Notary Service's current `fee()`), so a fee
+/// change between the decision and the submission would otherwise revert
+/// with `WrongValue` after the MPC-TLS session was already paid for.
 pub async fn submit_rotation<P: Provider>(
     provider: &P,
-    contract: Address,
+    roots: Address,
     calldata: Vec<u8>,
 ) -> Result<(TxHash, u64)> {
+    let fee = GoogleJwtRoots::new(roots, provider)
+        .quoteRotation()
+        .call()
+        .await
+        .context("quoteRotation() failed")?;
+    info!(contract = %roots, fee_wei = %fee, "rotate() costs the Notary Fee");
     let tx = TransactionRequest::default()
-        .with_to(contract)
+        .with_to(roots)
+        .with_value(fee)
         .with_input(Bytes::from(calldata));
     let receipt = provider
         .send_transaction(tx)
@@ -217,72 +157,28 @@ pub async fn submit_rotation<P: Provider>(
 
 #[cfg(test)]
 mod tests {
-    use notary::jwks::JwkRotationClaim;
-
     use super::*;
 
-    /// Every wire field lands in the corresponding ABI slot: decode the
-    /// encoded calldata back and compare. This is the seam between the
-    /// notary's wire format and the 0.3.0 rotate() ABI.
+    /// Both halves of the record land in the corresponding ABI slot,
+    /// untouched: decode the encoded calldata back and compare. This is the
+    /// seam between the notary's wire format and the `rotate(bytes,bytes)`
+    /// ABI — the signature is over `attested_data`, so a byte moved here is
+    /// a rotation the Notary Service refuses.
     #[test]
     fn rotate_calldata_round_trips_through_the_abi() {
-        let proof = JwksRotationProof {
+        let session = NotarizedSession {
+            attested_data: (0..=255u8).cycle().take(700).collect(),
             notary_signature: vec![0xab; 65],
-            domain_hash: [0x01; 32],
-            client_random: [0x02; 32],
-            server_random: [0x03; 32],
-            server_ephemeral_key: vec![0xcd; 65],
-            transcript_root: [0x04; 32],
-            timestamp: 1_700_000_000,
-            domain_path: vec![[0x10; 32], [0x11; 32]],
-            endpoint_path: vec![[0x20; 32]],
-            claims: vec![JwkRotationClaim {
-                kid: "oidc-1".into(),
-                n_b64url: "AQAB".into(),
-                jwk_bytes: br#"{"kty":"RSA","kid":"oidc-1"}"#.to_vec(),
-                jwk_path: vec![[0x30; 32]],
-            }],
         };
 
-        let calldata = rotate_calldata(&proof);
-        assert_eq!(&calldata[..4], IdentityJwksRoots::rotateCall::SELECTOR);
+        let calldata = rotate_calldata(&session);
+        assert_eq!(&calldata[..4], GoogleJwtRoots::rotateCall::SELECTOR);
 
-        let decoded = IdentityJwksRoots::rotateCall::abi_decode(&calldata).unwrap();
+        let decoded = GoogleJwtRoots::rotateCall::abi_decode(&calldata).unwrap();
         assert_eq!(
-            decoded.proof.notarySignature.as_ref(),
-            proof.notary_signature.as_slice()
+            decoded.attestedData.as_ref(),
+            session.attested_data.as_slice()
         );
-        assert_eq!(decoded.proof.domainHash.as_slice(), &proof.domain_hash);
-        assert_eq!(decoded.proof.clientRandom.as_slice(), &proof.client_random);
-        assert_eq!(decoded.proof.serverRandom.as_slice(), &proof.server_random);
-        assert_eq!(
-            decoded.proof.serverEphemeralKey.as_ref(),
-            proof.server_ephemeral_key.as_slice()
-        );
-        assert_eq!(
-            decoded.proof.transcriptRoot.as_slice(),
-            &proof.transcript_root
-        );
-        assert_eq!(decoded.proof.timestamp, U256::from(proof.timestamp));
-        assert_eq!(decoded.proof.domainPath.len(), 2);
-        assert_eq!(decoded.proof.endpointPath.len(), 1);
-        assert_eq!(decoded.claims.len(), 1);
-        assert_eq!(decoded.claims[0].kid.as_ref(), b"oidc-1");
-        assert_eq!(decoded.claims[0].nB64url.as_ref(), b"AQAB");
-        assert_eq!(
-            decoded.claims[0].jwkBytes.as_ref(),
-            proof.claims[0].jwk_bytes.as_slice()
-        );
-        assert_eq!(decoded.claims[0].jwkPath.len(), 1);
-    }
-
-    /// The two target ABIs must stay interchangeable for one shared
-    /// encoding path to be sound.
-    #[test]
-    fn both_contracts_share_the_rotate_selector() {
-        assert_eq!(
-            IdentityJwksRoots::rotateCall::SELECTOR,
-            GoogleOidcVerifier::rotateCall::SELECTOR,
-        );
+        assert_eq!(decoded.proof.as_ref(), session.notary_signature.as_slice());
     }
 }

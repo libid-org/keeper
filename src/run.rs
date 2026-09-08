@@ -16,7 +16,7 @@ use tracing::{
 use crate::{
     chain::{
         self,
-        TargetReading,
+        RootsReading,
     },
     config::{
         KeeperConfig,
@@ -32,9 +32,9 @@ use crate::{
 /// What one tick did.
 #[derive(Debug, Default)]
 pub struct TickOutcome {
-    /// Targets read successfully.
-    pub targets_read: usize,
-    /// Targets that needed a rotation.
+    /// Networks whose `GoogleJwtRoots` was read successfully.
+    pub networks_read: usize,
+    /// Networks that needed a rotation.
     pub rotations_needed: usize,
     /// Rotations submitted and confirmed.
     pub rotations_submitted: usize,
@@ -72,7 +72,7 @@ async fn fetch_google_keys(config: &KeeperConfig) -> Result<Vec<GoogleKey>> {
 
 /// One pass over every network. Decisions come first for ALL networks, so a
 /// single notarized reading (obtained at most once per tick) serves every
-/// contract that needs it — the proof is valid anywhere the notary is
+/// contract that needs it — the record is valid anywhere the notary is
 /// trusted, by design.
 pub async fn tick(
     config: &KeeperConfig,
@@ -95,32 +95,30 @@ pub async fn tick(
     );
 
     // ── decide ──────────────────────────────────────────────────────────────
-    let mut needy: Vec<(&ResolvedNetwork, TargetReading)> = Vec::new();
+    let mut needy: Vec<(&ResolvedNetwork, RootsReading)> = Vec::new();
     for network in networks {
         match read_network(config, network, &google_keys).await {
-            Ok(readings) => {
-                for reading in readings {
-                    outcome.targets_read += 1;
-                    let contract = reading.target.kind.label();
-                    if reading.needs_rotation() {
-                        outcome.rotations_needed += 1;
-                        for (kid, verdict) in &reading.keys {
-                            info!(
-                                network = %network.name,
-                                contract,
-                                kid = %kid,
-                                verdict = verdict.label(),
-                                "rotation required"
-                            );
-                        }
-                        needy.push((network, reading));
-                    } else {
+            Ok(reading) => {
+                outcome.networks_read += 1;
+                let contract = network.google_jwt_roots;
+                if reading.needs_rotation() {
+                    outcome.rotations_needed += 1;
+                    for (kid, verdict) in &reading.keys {
                         info!(
                             network = %network.name,
-                            contract,
-                            "up-to-date, no rotation needed"
+                            contract = %contract,
+                            kid = %kid,
+                            verdict = verdict.label(),
+                            "rotation required"
                         );
                     }
+                    needy.push((network, reading));
+                } else {
+                    info!(
+                        network = %network.name,
+                        contract = %contract,
+                        "up-to-date, no rotation needed"
+                    );
                 }
             }
             Err(e) => {
@@ -135,7 +133,7 @@ pub async fn tick(
     }
     if dry_run {
         info!(
-            targets = needy.len(),
+            networks = needy.len(),
             "dry run: rotations needed but not submitted"
         );
         return outcome;
@@ -145,29 +143,29 @@ pub async fn tick(
     let source = match ProofSource::from_config(config) {
         Ok(source) => source,
         Err(e) => {
-            warn!(error = %e, "cannot obtain a rotation proof");
+            warn!(error = %e, "cannot obtain a notarized reading");
             outcome.errors += 1;
             return outcome;
         }
     };
-    let proof = match source.obtain().await {
-        Ok(proof) => proof,
+    let session = match source.obtain().await {
+        Ok(session) => session,
         Err(e) => {
             warn!(error = %e, "notarized JWKS reading failed");
             outcome.errors += 1;
             return outcome;
         }
     };
-    let calldata = chain::rotate_calldata(&proof);
+    let calldata = chain::rotate_calldata(&session);
 
     // ── submit ──────────────────────────────────────────────────────────────
-    for (network, reading) in needy {
-        match submit_to(network, &reading, calldata.clone()).await {
+    for (network, _) in needy {
+        match submit_to(network, calldata.clone()).await {
             Ok(()) => outcome.rotations_submitted += 1,
             Err(e) => {
                 warn!(
                     network = %network.name,
-                    contract = reading.target.kind.label(),
+                    contract = %network.google_jwt_roots,
                     error = %e,
                     "rotation submission failed"
                 );
@@ -178,40 +176,31 @@ pub async fn tick(
     outcome
 }
 
-/// Read every target on one network.
+/// Read one network's `GoogleJwtRoots`.
 async fn read_network(
     config: &KeeperConfig,
     network: &ResolvedNetwork,
     google_keys: &[GoogleKey],
-) -> Result<Vec<TargetReading>> {
+) -> Result<RootsReading> {
     let provider = ProviderBuilder::new()
         .connect(&network.rpc_url)
         .await
         .with_context(|| format!("connecting to {}", network.rpc_url))?;
     let now = chain::chain_now(&provider).await?;
-    let mut readings = Vec::with_capacity(network.targets.len());
-    for target in &network.targets {
-        readings.push(
-            chain::read_target(
-                &provider,
-                target,
-                google_keys,
-                now,
-                config.renewal_threshold_secs,
-            )
-            .await
-            .with_context(|| format!("reading {}", target.kind.label()))?,
-        );
-    }
-    Ok(readings)
+    chain::read_roots(
+        &provider,
+        network.google_jwt_roots,
+        google_keys,
+        now,
+        config.renewal_threshold_secs,
+    )
+    .await
+    .with_context(|| format!("reading {}", network.google_jwt_roots))
 }
 
-/// Submit one rotation with the network's gas signer.
-async fn submit_to(
-    network: &ResolvedNetwork,
-    reading: &TargetReading,
-    calldata: Vec<u8>,
-) -> Result<()> {
+/// Submit one rotation with the network's gas signer, which also pays the
+/// Notary Fee.
+async fn submit_to(network: &ResolvedNetwork, calldata: Vec<u8>) -> Result<()> {
     let spec = network.signer.as_deref().with_context(|| {
         format!(
             "network '{}' needs a rotation but has no gas signer configured",
@@ -231,15 +220,15 @@ async fn submit_to(
         .with_context(|| format!("connecting to {}", network.rpc_url))?;
     info!(
         network = %network.name,
-        contract = reading.target.kind.label(),
+        contract = %network.google_jwt_roots,
         sender = %sender,
         "submitting rotate()"
     );
     let (tx_hash, gas_used) =
-        chain::submit_rotation(&provider, reading.target.address, calldata).await?;
+        chain::submit_rotation(&provider, network.google_jwt_roots, calldata).await?;
     info!(
         network = %network.name,
-        contract = reading.target.kind.label(),
+        contract = %network.google_jwt_roots,
         tx = %tx_hash,
         gas_used,
         "rotate() confirmed"
@@ -247,51 +236,45 @@ async fn submit_to(
     Ok(())
 }
 
-/// The read-only status table: per network and contract, every live Google
-/// kid with its on-chain verdict. Returns an error when any network read
-/// fails; a stale chain is NOT an error (that is what the keeper is for).
+/// The read-only status table: per network, every live Google kid with its
+/// on-chain verdict. Returns an error when any network read fails; a stale
+/// chain is NOT an error (that is what the keeper is for).
 pub async fn status(config: &KeeperConfig, networks: &[ResolvedNetwork]) -> Result<()> {
     let google_keys = fetch_google_keys(config).await?;
     println!(
-        "{:<16} {:<22} {:<46} {:<12} verdict",
-        "network", "contract", "kid", "expires-in"
+        "{:<16} {:<46} {:<12} verdict",
+        "network", "kid", "expires-in"
     );
     let mut failures = 0usize;
     for network in networks {
         match read_network(config, network, &google_keys).await {
-            Ok(readings) => {
-                for reading in readings {
-                    for (kid, verdict) in &reading.keys {
-                        use crate::decision::KeyVerdict;
-                        let left = match verdict {
-                            KeyVerdict::Fresh { secs_left }
-                            | KeyVerdict::Expiring { secs_left } => {
-                                human_secs(*secs_left)
-                            }
-                            KeyVerdict::Expired => "expired".into(),
-                            KeyVerdict::Untrusted => "-".into(),
-                        };
-                        println!(
-                            "{:<16} {:<22} {:<46} {:<12} {}",
-                            network.name,
-                            reading.target.kind.label(),
-                            kid,
-                            left,
-                            verdict.label()
-                        );
-                    }
-                    let needs = reading.needs_rotation();
+            Ok(reading) => {
+                for (kid, verdict) in &reading.keys {
+                    use crate::decision::KeyVerdict;
+                    let left = match verdict {
+                        KeyVerdict::Fresh { secs_left }
+                        | KeyVerdict::Expiring { secs_left } => human_secs(*secs_left),
+                        KeyVerdict::Expired => "expired".into(),
+                        KeyVerdict::Untrusted => "-".into(),
+                    };
                     println!(
-                        "{:<16} {:<22} => {}",
+                        "{:<16} {:<46} {:<12} {}",
                         network.name,
-                        reading.target.kind.label(),
-                        if needs {
-                            "NEEDS ROTATION"
-                        } else {
-                            "up-to-date"
-                        }
+                        kid,
+                        left,
+                        verdict.label()
                     );
                 }
+                println!(
+                    "{:<16} {} => {}",
+                    network.name,
+                    network.google_jwt_roots,
+                    if reading.needs_rotation() {
+                        "NEEDS ROTATION"
+                    } else {
+                        "up-to-date"
+                    }
+                );
             }
             Err(e) => {
                 failures += 1;

@@ -86,7 +86,7 @@ google_oidc_verifier = "0x69cc7c69b39ada71ce908d432868d5ef9a6a6d0e"
 #   github_identity_verifier = ""
 #   # optional, each needs a large Honk circuit verifier:
 #   x_identity_verifier = ""
-#   google_identity_verifier = ""   # also deploys identity_jwks_roots
+#   google_identity_verifier = ""   # also deploys google_jwt_roots
 #
 # A key that is PRESENT but empty is a deploy request; a key that is ABSENT
 # is "not wanted". GitHub needs only the notary+backend keys and is always

@@ -2,12 +2,12 @@
 //! file, and the full keeper loop against a real chain.
 //!
 //! The end-to-end test is everything but MPC-TLS itself: a real Anvil node,
-//! the real `Notary` / `IdentityJwksRoots` / `GoogleOidcVerifier` contracts
-//! deployed from libid-contracts' embedded artifacts, a local HTTP server
-//! standing in for Google's JWKS endpoint, and the notary crate's mock prover
-//! (which signs the exact digest a real MPC-TLS session produces) as the
-//! proof source — wired through keeper.toml, not through test-only APIs, so
-//! the config surface is exercised too.
+//! the real `NotaryService` / `GoogleJwtRoots` contracts deployed from
+//! libid-contracts' embedded artifacts, a local HTTP server standing in for
+//! Google's JWKS endpoint (serving Google's real body), and the notary
+//! crate's mock prover (which signs the exact record a real MPC-TLS session
+//! produces) as the proof source — wired through keeper.toml, not through
+//! test-only APIs, so the config surface is exercised too.
 
 use std::path::Path;
 
@@ -17,26 +17,21 @@ use alloy::{
         Address,
         U256,
     },
-    providers::ProviderBuilder,
-};
-use base64::{
-    engine::general_purpose::URL_SAFE_NO_PAD,
-    Engine as _,
+    providers::{
+        Provider,
+        ProviderBuilder,
+    },
 };
 use keeper::{
-    config::{
-        ContractKind,
-        KeeperConfig,
-    },
+    config::KeeperConfig,
     decision,
     run,
 };
 use libid_contracts::{
     artifacts::Artifacts,
-    bindings::{
-        identity::IdentityJwksRoots,
-        notary::Notary,
-        oidc::GoogleOidcVerifier,
+    bindings::ceremony::{
+        GoogleJwtRoots,
+        NotaryService,
     },
     deploy::deploy_behind_proxy,
 };
@@ -50,12 +45,23 @@ use tokio::io::{
     AsyncWriteExt,
 };
 
-/// Anvil's dev key #0 — pays gas for deploys and rotations.
+/// Anvil's dev key #0 — pays gas and the Notary Fee for deploys and
+/// rotations.
 const GAS_KEY: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
-/// Anvil's dev key #1 — the MOCK notary signing key. The `Notary` contract is
-/// initialized with this key's address, so mock proofs verify on-chain.
+/// Anvil's dev key #1 — the MOCK notary signing key. The `NotaryService` is
+/// initialized trusting this key's address, so mock records verify on-chain.
 const NOTARY_KEY: &str =
     "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
+/// The Notary Fee the service is deployed with. Non-zero on purpose: a
+/// rotation that forgot to attach it must revert, and the fee must land in
+/// the service, not with the roots contract.
+const NOTARY_FEE_WEI: u64 = 1_000;
+
+/// Google's real JWKS body (fetched 2026-09-03 with `curl --http1.1`):
+/// pretty-printed, two-space indent, LF newlines — the shape the on-chain
+/// parser reads in production, so the loop is driven with it rather than
+/// with a compact body the keeper would never see.
+const GOOGLE_BODY: &str = include_str!("fixtures/certs.json");
 
 /// Write `keeper.toml` (and return its path) inside `dir`.
 fn write_keeper_toml(dir: &Path, contents: &str) -> std::path::PathBuf {
@@ -67,9 +73,11 @@ fn write_keeper_toml(dir: &Path, contents: &str) -> std::path::PathBuf {
 // ── config resolution ───────────────────────────────────────────────────────
 
 /// A `network_file` reference resolves against the real eden-testnet file
-/// (verbatim from chain-configurations): the RPC and the deployed
-/// `google_oidc_verifier` come out, and the absent `[identity]` section
-/// yields no `identity_jwks_roots` target.
+/// (verbatim from chain-configurations). That legacy record has no
+/// `[identity]` section — its only JWKS contract was the login stack's
+/// `GoogleOidcVerifier`, which is archived — so the file names nothing the
+/// keeper serves, and the load says so instead of resolving an empty
+/// network.
 #[test]
 fn network_file_reference_resolves_the_chain_configurations_schema() {
     let dir = tempfile::tempdir().unwrap();
@@ -82,21 +90,11 @@ fn network_file_reference_resolves_the_chain_configurations_schema() {
         &format!("[[networks]]\nnetwork_file = \"{fixture}\"\n"),
     );
 
-    let (_, networks) = KeeperConfig::load(&path).unwrap();
-    assert_eq!(networks.len(), 1);
-    let network = &networks[0];
-    assert_eq!(network.name, "eden-testnet");
-    assert_eq!(
-        network.rpc_url,
-        "https://ev-reth-eden-testnet.binarybuilders.services:8545"
-    );
-    assert_eq!(network.targets.len(), 1);
-    assert_eq!(network.targets[0].kind, ContractKind::GoogleOidcVerifier);
-    assert_eq!(
-        network.targets[0].address,
-        "0x69cc7c69b39ada71ce908d432868d5ef9a6a6d0e"
-            .parse::<Address>()
-            .unwrap()
+    let err = KeeperConfig::load(&path).unwrap_err();
+    let message = format!("{err:#}");
+    assert!(
+        message.contains("network 'eden-testnet' names no JWKS contract"),
+        "{message}"
     );
 }
 
@@ -113,7 +111,7 @@ fn config_refuses_notary_url_alongside_mock_notary() {
          [[networks]]\n\
          name = \"n\"\n\
          rpc_url = \"http://127.0.0.1:1\"\n\
-         identity_jwks_roots = \"0x69cc7c69b39ada71ce908d432868d5ef9a6a6d0e\"\n",
+         google_jwt_roots = \"0x69cc7c69b39ada71ce908d432868d5ef9a6a6d0e\"\n",
     );
     let err = KeeperConfig::load(&path).unwrap_err();
     assert!(err.to_string().contains("test seam"), "{err:#}");
@@ -126,7 +124,7 @@ fn config_refuses_duplicate_network_names() {
     let entry = "[[networks]]\n\
                  name = \"n\"\n\
                  rpc_url = \"http://127.0.0.1:1\"\n\
-                 identity_jwks_roots = \"0x69cc7c69b39ada71ce908d432868d5ef9a6a6d0e\"\n";
+                 google_jwt_roots = \"0x69cc7c69b39ada71ce908d432868d5ef9a6a6d0e\"\n";
     let path = write_keeper_toml(dir.path(), &format!("{entry}{entry}"));
     let err = KeeperConfig::load(&path).unwrap_err();
     assert!(
@@ -137,30 +135,11 @@ fn config_refuses_duplicate_network_names() {
 
 // ── the end-to-end loop ─────────────────────────────────────────────────────
 
-/// A deterministic 256-byte RSA modulus (the contracts reject any other
-/// length), base64url-encoded the way Google publishes `n`.
-fn test_modulus(seed: u8) -> String {
-    let bytes: Vec<u8> = (0..256u16)
-        .map(|i| (i as u8).wrapping_mul(31).wrapping_add(seed) | 0x01)
-        .collect();
-    URL_SAFE_NO_PAD.encode(bytes)
-}
-
-/// The JWKS body both the keeper's poll and the mock prover read.
-fn jwks_fixture_body() -> String {
-    serde_json::json!({
-        "keys": [
-            {"kty": "RSA", "alg": "RS256", "use": "sig",
-             "kid": "e2e-key-1", "n": test_modulus(3), "e": "AQAB"},
-            {"kty": "RSA", "alg": "RS256", "use": "sig",
-             "kid": "e2e-key-2", "n": test_modulus(89), "e": "AQAB"},
-        ]
-    })
-    .to_string()
-}
-
 /// Serve `body` as an HTTP 200 on a random localhost port; returns the URL —
-/// the stand-in for `oauth2/v3/certs`.
+/// the stand-in for `oauth2/v3/certs`. Both the keeper's poll and the mock
+/// prover fetch from here; the mock then frames the body itself, chunked,
+/// the way Google does, so what reaches the chain is not this server's
+/// framing.
 async fn serve_jwks(body: String) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -187,9 +166,10 @@ async fn serve_jwks(body: String) -> String {
 
 /// The whole loop against a real chain: deploy the real contracts, point the
 /// keeper at a JWKS fixture, and drive `tick` through dry-run → rotation →
-/// steady state, asserting the on-chain trust tables along the way.
+/// steady state, asserting the on-chain trust table and the fee along the
+/// way.
 #[tokio::test(flavor = "multi_thread")]
-async fn keeper_rotates_both_contracts_then_reaches_steady_state() {
+async fn keeper_rotates_the_roots_then_reaches_steady_state() {
     let anvil = Anvil::new().spawn();
     let (wallet, deployer) = SignerSource::from_spec(GAS_KEY)
         .unwrap()
@@ -202,55 +182,41 @@ async fn keeper_rotates_both_contracts_then_reaches_steady_state() {
         .await
         .unwrap();
 
-    // The on-chain notary signer IS the mock's signing key — the one
-    // configuration under which a mock proof verifies.
+    // The on-chain trusted notary IS the mock's signing key — the one
+    // configuration under which a mock record verifies.
     let notary_signer = Address::from(pubkey_to_eth_address(
         hex_to_signing_key(NOTARY_KEY).unwrap().verifying_key(),
     ));
+    let fee = U256::from(NOTARY_FEE_WEI);
 
     let artifacts = Artifacts::embedded();
-    let notary_proxy = deploy_behind_proxy(
+    let notary_service = deploy_behind_proxy(
         &provider,
         &artifacts,
-        "Notary",
-        &Notary::initializeCall {
+        "NotaryService",
+        &NotaryService::initializeCall {
             owner_: deployer,
             notary_: notary_signer,
+            fee_: fee,
         },
         None,
     )
     .await
     .unwrap();
-    let jwks_roots = deploy_behind_proxy(
+    let jwt_roots = deploy_behind_proxy(
         &provider,
         &artifacts,
-        "IdentityJwksRoots",
-        &IdentityJwksRoots::initializeCall {
+        "GoogleJwtRoots",
+        &GoogleJwtRoots::initializeCall {
             owner_: deployer,
-            notaryContract_: notary_proxy,
-        },
-        None,
-    )
-    .await
-    .unwrap();
-    let oidc_verifier = deploy_behind_proxy(
-        &provider,
-        &artifacts,
-        "GoogleOidcVerifier",
-        &GoogleOidcVerifier::initializeCall {
-            // rotate() never touches the Honk verifier; any nonzero address
-            // satisfies initialize.
-            _verifier: Address::repeat_byte(0x42),
-            _owner: deployer,
-            notaryContract_: notary_proxy,
-            initialAud: "e2e-client-id".into(),
+            notary_: notary_service,
         },
         None,
     )
     .await
     .unwrap();
 
-    let jwks_url = serve_jwks(jwks_fixture_body()).await;
+    let jwks_url = serve_jwks(GOOGLE_BODY.to_string()).await;
     let dir = tempfile::tempdir().unwrap();
     let path = write_keeper_toml(
         dir.path(),
@@ -262,22 +228,22 @@ async fn keeper_rotates_both_contracts_then_reaches_steady_state() {
              [[networks]]\n\
              name = \"anvil\"\n\
              rpc_url = \"{rpc}\"\n\
-             identity_jwks_roots = \"{jwks_roots}\"\n\
-             google_oidc_verifier = \"{oidc_verifier}\"\n",
+             google_jwt_roots = \"{jwt_roots}\"\n",
             rpc = anvil.endpoint(),
         ),
     );
     let (config, networks) = KeeperConfig::load(&path).unwrap();
 
-    let google_keys =
-        decision::parse_google_jwks(jwks_fixture_body().as_bytes()).unwrap();
-    let roots = IdentityJwksRoots::new(jwks_roots, &provider);
-    let verifier = GoogleOidcVerifier::new(oidc_verifier, &provider);
+    let google_keys = decision::parse_google_jwks(GOOGLE_BODY.as_bytes()).unwrap();
+    assert_eq!(google_keys.len(), 2, "Google publishes two keys today");
+    let roots = GoogleJwtRoots::new(jwt_roots, &provider);
+    assert_eq!(roots.quoteRotation().call().await.unwrap(), fee);
+    let service_balance_before = provider.get_balance(notary_service).await.unwrap();
 
-    // ── dry run: both contracts need rotation, nothing is submitted ─────────
+    // ── dry run: the roots need rotation, nothing is submitted ──────────────
     let outcome = run::tick(&config, &networks, true).await;
-    assert_eq!(outcome.targets_read, 2);
-    assert_eq!(outcome.rotations_needed, 2);
+    assert_eq!(outcome.networks_read, 1);
+    assert_eq!(outcome.rotations_needed, 1);
     assert_eq!(outcome.rotations_submitted, 0);
     assert_eq!(outcome.errors, 0);
     for key in &google_keys {
@@ -289,11 +255,11 @@ async fn keeper_rotates_both_contracts_then_reaches_steady_state() {
         assert_eq!(expiry, U256::ZERO, "dry run must not touch the chain");
     }
 
-    // ── the real tick: one mock proof serves both contracts ─────────────────
+    // ── the real tick: one mock session, one rotation, one fee ──────────────
     let outcome = run::tick(&config, &networks, false).await;
-    assert_eq!(outcome.targets_read, 2);
-    assert_eq!(outcome.rotations_needed, 2);
-    assert_eq!(outcome.rotations_submitted, 2);
+    assert_eq!(outcome.networks_read, 1);
+    assert_eq!(outcome.rotations_needed, 1);
+    assert_eq!(outcome.rotations_submitted, 1);
     assert_eq!(outcome.errors, 0);
     assert!(outcome.is_success());
     for key in &google_keys {
@@ -303,21 +269,27 @@ async fn keeper_rotates_both_contracts_then_reaches_steady_state() {
             .await
             .unwrap();
         assert!(expiry > U256::ZERO, "modulus of {} not trusted", key.kid);
-        let modulus = verifier.modulusOfKid(key.kid_hash).call().await.unwrap();
-        assert_eq!(
-            modulus, key.modulus_hash,
-            "kid {} modulus mismatch",
-            key.kid
-        );
-        let expiry = verifier.expiresAtKid(key.kid_hash).call().await.unwrap();
-        assert!(expiry > U256::ZERO, "kid {} not stamped", key.kid);
     }
+    // The reading became the current generation, whole: every key Google
+    // served, and nothing before it.
+    let generations = roots.currentKeys().call().await.unwrap();
+    assert_eq!(generations.current.moduli.len(), google_keys.len());
+    assert!(generations.previous.moduli.is_empty());
+    assert!(!roots.needsRotation().call().await.unwrap());
+    // The Notary Fee went to the Notary Service — exactly once, exactly whole.
+    let service_balance_after = provider.get_balance(notary_service).await.unwrap();
+    assert_eq!(service_balance_after - service_balance_before, fee);
 
-    // ── steady state: freshly stamped 30-day TTLs are beyond the 7-day
+    // ── steady state: a reading lifetime of 30 days is beyond the 7-day
     // threshold, so the next tick reads everything and submits nothing ──────
     let outcome = run::tick(&config, &networks, false).await;
-    assert_eq!(outcome.targets_read, 2);
+    assert_eq!(outcome.networks_read, 1);
     assert_eq!(outcome.rotations_needed, 0);
     assert_eq!(outcome.rotations_submitted, 0);
     assert_eq!(outcome.errors, 0);
+    assert_eq!(
+        provider.get_balance(notary_service).await.unwrap(),
+        service_balance_after,
+        "no rotation, no fee"
+    );
 }
