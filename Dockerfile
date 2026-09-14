@@ -5,8 +5,10 @@
 # binaries that need GLIBC_2.38+ and fail on bookworm (glibc 2.36) at runtime.
 FROM rust:1.98-slim-bookworm AS builder
 
-# git: the libid-rs and tlsn dependencies are git sources.
-RUN apt-get update && apt-get install -y pkg-config libssl-dev git && rm -rf /var/lib/apt/lists/*
+# git: the libid-rs and tlsn dependencies are git sources. Nothing else is
+# needed — the TLS stack is rustls (aws-lc-sys/ring), so there is no
+# openssl-sys in the graph.
+RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
@@ -31,9 +33,35 @@ RUN cargo build --locked --release
 # === Runtime ===
 FROM debian:bookworm-slim
 
-RUN apt-get update && apt-get install -y ca-certificates libssl3 && rm -rf /var/lib/apt/lists/*
+# ca-certificates: outbound TLS to Google, to every configured RPC, and to AWS
+# KMS when a signer is a key id. libssl3 is deliberately not named: nothing
+# links it — `ldd` on the binary lists libc, libm and libgcc_s only.
+# ca-certificates still pulls it in through openssl, so dropping the explicit
+# install does not shrink the image; it stops the Dockerfile claiming a
+# dependency this binary does not have.
+RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/target/release/keeper /usr/local/bin/keeper
 
+# The keeper writes nothing and listens on nothing, so it has no reason to be
+# root. A fixed uid/gid keeps behaviour stable for the one thing a deployment
+# does mount: its keeper.toml.
+RUN groupadd --system --gid 10001 keeper \
+    && useradd --system --uid 10001 --gid keeper --no-create-home --shell /usr/sbin/nologin keeper
+USER 10001:10001
+
+# Where a deployment mounts its config. `--config` defaults to a RELATIVE
+# `keeper.toml`, which in a container resolves against `/`; naming the path
+# absolutely makes `-v ./keeper.toml:/etc/keeper/keeper.toml` the whole recipe.
+ENV KEEPER_CONFIG=/etc/keeper/keeper.toml
+
+# No EXPOSE and no HEALTHCHECK: the keeper serves nothing. `keeper once` exits
+# nonzero when a tick failed, which is the health signal a scheduler reads;
+# `keeper run` is a long process whose liveness is its exit code.
+
+# Links the ghcr package to this repo and records what the image came from.
+LABEL org.opencontainers.image.source="https://github.com/libid-org/keeper" \
+      org.opencontainers.image.description="libID JWKS keeper: notarized readings of Google's JWKS, rotated into GoogleJwtRoots on every configured chain." \
+      org.opencontainers.image.licenses="MIT OR Apache-2.0"
 
 ENTRYPOINT ["keeper"]
