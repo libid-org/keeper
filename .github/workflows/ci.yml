@@ -73,11 +73,6 @@ jobs:
           toolchain: ${{ env.RUST_VERSION }}
           components: clippy
 
-      # The e2e test spawns `anvil` (alloy node-bindings).
-      - uses: foundry-rs/foundry-toolchain@908c540300062bd5a7e473851cdb4282204cee09 # v1.9.1
-        with:
-          version: stable
-
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: Formatting (nightly rustfmt)
@@ -96,12 +91,12 @@ jobs:
   # E2E: the rotation path for real — the released notary image, the contract
   # stack as the deploy tool lays it down, and Google's LIVE key set.
   #
-  # `cargo test --all` in the `rust` job covers everything but MPC-TLS, with
-  # the mock prover standing in. This job covers the rest, so the two together
-  # leave no part of the path unproven. Nothing here is a stand-in: the notary
-  # is the image a deployment runs, the contracts are what `libid-deploy
-  # apply` produces, and the endpoint is www.googleapis.com, which
-  # GoogleJwtRoots pins and no local TLS fixture can impersonate.
+  # The only job that drives a rotation. `cargo test --all` in the `rust`
+  # job covers config, the decision and the request's shape, and nothing
+  # there signs a record. Nothing here is a stand-in: the notary is the image
+  # a deployment runs, the contracts are what `libid-deploy apply` produces,
+  # and the endpoint is www.googleapis.com, which GoogleJwtRoots pins and no
+  # local TLS fixture can impersonate.
   # ---------------------------------------------------------------------------
   e2e:
     name: E2E (live Google)
