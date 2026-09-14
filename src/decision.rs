@@ -206,6 +206,16 @@ mod tests {
         assert_ne!(keys[0].modulus_hash, keys[1].modulus_hash);
     }
 
+    /// Google's real body (fetched 2026-09-03 with `curl --http1.1`):
+    /// pretty-printed, two-space indent, LF newlines -- the shape the poll
+    /// reads in production, not the compact form the other tests hand in.
+    #[test]
+    fn parse_google_jwks_reads_the_body_google_serves() {
+        let body = include_bytes!("../tests/fixtures/certs.json");
+        let keys = parse_google_jwks(body).unwrap();
+        assert_eq!(keys.len(), 2, "Google published two keys that day");
+    }
+
     /// The contract refuses any modulus that is not 256 bytes, so a key of
     /// another size must not reach the decision: it is skipped, the others
     /// still rotate.

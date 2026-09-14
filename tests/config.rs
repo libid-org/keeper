@@ -88,6 +88,26 @@ fn network_file_reads_both_spellings_of_the_roots_address() {
     }
 }
 
+/// `keeper.toml` is strict: a key the schema does not declare fails the load
+/// by name, so a typo, or a key a release removed, cannot ride along silently
+/// and be read as "unset".
+#[test]
+fn config_refuses_a_key_it_does_not_declare() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_keeper_toml(
+        dir.path(),
+        "[proof]\n\
+         signing_key = \"ab\"\n\
+         [[networks]]\n\
+         name = \"n\"\n\
+         rpc_url = \"http://127.0.0.1:1\"\n\
+         google_jwt_roots = \"0x69cc7c69b39ada71ce908d432868d5ef9a6a6d0e\"\n",
+    );
+    let err = KeeperConfig::load(&path).unwrap_err();
+    let message = format!("{err:#}");
+    assert!(message.contains("unknown field `proof`"), "{message}");
+}
+
 /// Two entries resolving to the same name would double-submit; refused.
 #[test]
 fn config_refuses_duplicate_network_names() {
