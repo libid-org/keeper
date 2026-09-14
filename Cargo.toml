@@ -38,15 +38,18 @@ libid-signer = { git = "https://github.com/libid-org/libid-rs", tag = "v0.4.0" }
 libid-tlsn = { git = "https://github.com/libid-org/libid-rs", tag = "v0.4.0" }
 libid-transcript = { git = "https://github.com/libid-org/libid-rs", tag = "v0.4.0" }
 libid-ceremony = { git = "https://github.com/libid-org/libid-rs", tag = "v0.4.0" }
+# The mock signs with a `k256::SigningKey` and hands it to libid-crypto:
+# 0.13 is libid-rs's line, and 0.14 here would be a second, incompatible type.
 k256 = { version = "0.13", features = ["ecdsa"] }
 
 # ── contract bindings + deploy helpers ──────────────────────────────────────
-# The registry crate is fine here: it has no tlsn-adjacent types. 0.7.0 is
-# the first release whose `GoogleJwtRoots` verifies through the Notary
-# Service (`rotate(bytes,bytes) payable`, `quoteRotation()`) and whose
-# artifacts carry `NotaryService`; it embeds forge output that is not in git,
-# so it cannot be taken from the repo before it is published.
+# The registry crate is fine here: it has no tlsn-adjacent types. Its
+# `GoogleJwtRoots` verifies through the Notary Service (`rotate(bytes,bytes)
+# payable`, `quoteRotation()`), and it embeds the forge artifacts the e2e
+# deploys, which are not in git — so it cannot be taken from the repo.
 libid-contracts = "0.10.0"
+# Follows libid-contracts' alloy line. The bindings take and return alloy
+# types, so a 2.x here would be a second, incompatible `Provider`.
 alloy = { version = "1", features = [
     "contract",
     "providers",
@@ -57,14 +60,17 @@ alloy = { version = "1", features = [
 
 # ── everything else ─────────────────────────────────────────────────────────
 anyhow = "1"
-base64 = "0.22"
+base64 = "0.23"
 clap = { version = "4", features = ["derive", "env"] }
 hex = "0.4"
-num-bigint = "0.4"
+num-bigint = "0.5"
 # Plain-HTTPS fetch of Google's live JWKS (the cheap poll; notarization
-# happens only when a rotation is actually needed).
-reqwest = { version = "0.12", default-features = false, features = [
-    "rustls-tls",
+# happens only when a rotation is actually needed). The same 0.13 alloy's
+# HTTP transport pulls, with the TLS backend it already turns on (`rustls`
+# is 0.12's `rustls-tls`: aws-lc-rs plus the platform verifier), so the build
+# carries ONE reqwest and one TLS stack.
+reqwest = { version = "0.13", default-features = false, features = [
+    "rustls",
     "json",
 ] }
 serde = { version = "1", features = ["derive"] }
@@ -78,7 +84,7 @@ tokio = { version = "1", features = [
     "time",
     "signal",
 ] }
-toml = "0.8"
+toml = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
