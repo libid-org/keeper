@@ -29,15 +29,15 @@ path = "src/main.rs"
 # is git-only and exposes sibling-crate types, and `NotarizedSession` is
 # libid-transcript's `AttestationWire`, the frame both sides read and write.
 # Moves with the notary's pin, never on its own.
-libid-crypto = { git = "https://github.com/libid-org/libid-rs", tag = "v0.3.0" }
-libid-signer = { git = "https://github.com/libid-org/libid-rs", tag = "v0.3.0" }
+libid-crypto = { git = "https://github.com/libid-org/libid-rs", tag = "v0.4.0" }
+libid-signer = { git = "https://github.com/libid-org/libid-rs", tag = "v0.4.0" }
 # The JWKS prover runs the MPC-TLS session itself (libid-tlsn), states its
 # layout and reads the frame back (libid-transcript), and the mock encodes the
 # record (libid-ceremony). All at the same tag, or cargo carries two copies of
 # the types.
-libid-tlsn = { git = "https://github.com/libid-org/libid-rs", tag = "v0.3.0" }
-libid-transcript = { git = "https://github.com/libid-org/libid-rs", tag = "v0.3.0" }
-libid-ceremony = { git = "https://github.com/libid-org/libid-rs", tag = "v0.3.0" }
+libid-tlsn = { git = "https://github.com/libid-org/libid-rs", tag = "v0.4.0" }
+libid-transcript = { git = "https://github.com/libid-org/libid-rs", tag = "v0.4.0" }
+libid-ceremony = { git = "https://github.com/libid-org/libid-rs", tag = "v0.4.0" }
 k256 = { version = "0.13", features = ["ecdsa"] }
 
 # ── contract bindings + deploy helpers ──────────────────────────────────────
@@ -46,7 +46,7 @@ k256 = { version = "0.13", features = ["ecdsa"] }
 # Service (`rotate(bytes,bytes) payable`, `quoteRotation()`) and whose
 # artifacts carry `NotaryService`; it embeds forge output that is not in git,
 # so it cannot be taken from the repo before it is published.
-libid-contracts = "0.7.0"
+libid-contracts = "0.10.0"
 alloy = { version = "1", features = [
     "contract",
     "providers",
