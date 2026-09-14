@@ -54,7 +54,7 @@ pub struct KeeperConfig {
     #[serde(default)]
     pub signer: Option<String>,
     /// TEST-ONLY seam: skip MPC-TLS and build notarized sessions with
-    /// [`notary::jwks::mock::MockProver`] signing with this key. The chain
+    /// [`crate::jwks::mock::MockProver`] signing with this key. The chain
     /// accepts them only where this key IS a notary the Notary Service
     /// trusts, which is never true of a production deployment. Refused
     /// alongside `notary_url`.

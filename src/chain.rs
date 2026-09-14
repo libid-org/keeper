@@ -16,6 +16,7 @@
 //! while the current reading still has runway) and its 7-day runway is fixed
 //! where `renewal_threshold_secs` is configurable — so the decision stays here.
 
+use crate::jwks::NotarizedSession;
 use alloy::{
     eips::BlockNumberOrTag,
     network::TransactionBuilder,
@@ -35,7 +36,6 @@ use anyhow::{
     Result,
 };
 use libid_contracts::bindings::ceremony::GoogleJwtRoots;
-use notary::NotarizedSession;
 use tracing::info;
 
 use crate::decision::{

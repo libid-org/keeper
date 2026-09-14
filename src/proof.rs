@@ -1,26 +1,26 @@
 //! Obtaining a [`NotarizedSession`] — the notarized reading of Google's JWKS.
 //!
 //! The production path is the real thing: an MPC-TLS session against a
-//! running libid notary's TCP wire port, driven by the notary crate's own
-//! prover-side helpers ([`notary::jwks::prover::notarize_jwks`]). The mock
+//! running libid notary's TCP wire port, driven by this crate's own
+//! prover-side helpers ([`crate::jwks::prover::notarize_jwks`]). The mock
 //! path exists for end-to-end tests only (see
 //! [`crate::config::KeeperConfig::mock_notary`]). Both hand back the same
 //! record — the section 9.1 bytes and the notary's signature over them —
 //! which is exactly what `GoogleJwtRoots.rotate` takes.
 
+use crate::jwks::{
+    mock::{
+        MockProver,
+        MockProverConfig,
+    },
+    NotarizedSession,
+};
 use anyhow::{
     bail,
     Context,
     Result,
 };
 use libid_crypto::hex_to_signing_key;
-use notary::{
-    jwks::mock::{
-        MockProver,
-        MockProverConfig,
-    },
-    NotarizedSession,
-};
 use tokio::net::TcpStream;
 use tracing::info;
 
@@ -75,7 +75,7 @@ impl ProofSource {
                 let socket = TcpStream::connect(addr)
                     .await
                     .with_context(|| format!("connecting to notary at {addr}"))?;
-                let session = notary::jwks::prover::notarize_jwks(socket)
+                let session = crate::jwks::prover::notarize_jwks(socket)
                     .await
                     .context("MPC-TLS JWKS notarization failed")?;
                 info!(

@@ -23,6 +23,7 @@
 pub mod chain;
 pub mod config;
 pub mod decision;
+pub mod jwks;
 pub mod proof;
 pub mod run;
 
