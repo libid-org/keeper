@@ -1,8 +1,9 @@
 name: CI
 
-# Two jobs: rust (fmt/clippy/test) and dco — the same shape as the other
-# libid-org repos (notary, libid-rs), so a contributor moving between them
-# meets the same gates.
+# Three jobs: rust (fmt/clippy/test), e2e (the real rotation path — notary
+# image, deployed stack, live Google) and dco. rust and dco are the same shape
+# as the other libid-org repos (notary, libid-rs), so a contributor moving
+# between them meets the same gates; e2e is this repo's own, and the heaviest.
 #
 # Every third-party action is pinned by commit SHA, with the tag in a comment,
 # so a moved tag cannot change what executes.

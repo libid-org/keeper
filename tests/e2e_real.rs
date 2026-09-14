@@ -19,10 +19,14 @@
 //!   --signing-key 59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d
 //! ```
 //!
-//! or from the published image:
+//! or from an image. It must be a `custom-<sha>` build: every released
+//! `<version>` tag up to 0.3.0-rc.3 still answers a www.googleapis.com
+//! session with the old JWKS response instead of a ceremony attestation, and
+//! pins the pre-domain-separation mpz. Restore the `<version>` form once a
+//! notary release carries the JWKS-free server.
 //!
 //! ```sh
-//! docker run --rm -p 7047:7047 ghcr.io/libid-org/notary:<version> \
+//! docker run --rm -p 7047:7047 ghcr.io/libid-org/notary:custom-c957999 \
 //!   --host 0.0.0.0 --port 7047 --ws-port 0 \
 //!   --signing-key 59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d
 //! ```

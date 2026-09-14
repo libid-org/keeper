@@ -8,8 +8,9 @@
 #     -v "$PWD/keeper.toml:/etc/keeper/keeper.toml:ro" \
 #     ghcr.io/libid-org/keeper:<version> run
 #
-# `status` and `once --dry-run` need only `[[networks]]`; `run` and `once`
-# also need `notary_url` and a `signer`, and refuse to start without them.
+# `status`, and either subcommand with `--dry-run`, need only `[[networks]]`;
+# `run` and `once` WITHOUT `--dry-run` also need `notary_url` and a `signer`,
+# and refuse to start without them.
 # Mount the directory instead of the file when keeper.toml references
 # chain-configurations network files: they resolve relative to it. A KMS
 # signer takes its credentials from the usual AWS environment (IRSA on EKS,

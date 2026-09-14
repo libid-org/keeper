@@ -80,10 +80,9 @@ pub fn parse_google_jwks(body: &[u8]) -> Result<Vec<GoogleKey>> {
 /// as a 32-byte big-endian word — the exact value the contracts store and
 /// the JWT circuit exposes.
 ///
-/// Vendored from the original monorepo's `oidc-core::compute_modulus_hash`
-/// (now `libid-oidc-core` in the libid repo); an upstream candidate for a
-/// shared libid-rs crate so the keeper, the circuits and the backend can
-/// never drift apart.
+/// Vendored from the monorepo's `dyaka-oidc-core::compute_modulus_hash`; an
+/// upstream candidate for a shared libid-rs crate so the keeper, the circuits
+/// and the backend can never drift apart.
 pub fn modulus_hash(n_b64url: &str) -> Result<B256> {
     const NUM_LIMBS: usize = 18;
     /// The one modulus size the contract installs and the circuit verifies.
