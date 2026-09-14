@@ -1,9 +1,29 @@
-# Production image for the libID JWKS keeper: polls Google, notarizes via MPC-TLS, rotates on-chain roots.
+# Production image for the libID JWKS keeper: polls Google, notarizes via
+# MPC-TLS, rotates on-chain roots.
+#
+# The whole runtime contract is one file, mounted read-only where
+# KEEPER_CONFIG points (see the ENV below):
+#
+#   docker run --rm \
+#     -v "$PWD/keeper.toml:/etc/keeper/keeper.toml:ro" \
+#     ghcr.io/libid-org/keeper:<version> run
+#
+# `status` and `once --dry-run` need only `[[networks]]`; `run` and `once`
+# also need `notary_url` and a `signer`, and refuse to start without them.
+# Mount the directory instead of the file when keeper.toml references
+# chain-configurations network files: they resolve relative to it. A KMS
+# signer takes its credentials from the usual AWS environment (IRSA on EKS,
+# or AWS_* variables).
+#
+# Every tag is a manifest list for linux/amd64 and linux/arm64, so the same
+# reference runs on GitHub's runners, on x86 and Graviton nodes, and on Apple
+# Silicon without a --platform flag. Both base images are pinned by the digest
+# of their multi-platform index, so the pin covers every architecture.
 #
 # Pin the builder to bookworm so its glibc matches the bookworm-slim runtime
 # stage below. A bare `-slim` tag floats to newer Debian (trixie), producing
 # binaries that need GLIBC_2.38+ and fail on bookworm (glibc 2.36) at runtime.
-FROM rust:1.98-slim-bookworm AS builder
+FROM rust:1.98.1-slim-bookworm@sha256:ebd900bae66fd508b466cef82d64a83a5fb34682e4c8b2797a42908bddc95a57 AS builder
 
 # git: the libid-rs and tlsn dependencies are git sources. Nothing else is
 # needed — the TLS stack is rustls (aws-lc-sys/ring), so there is no
@@ -31,7 +51,7 @@ COPY src/ src/
 RUN cargo build --locked --release
 
 # === Runtime ===
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171
 
 # ca-certificates: outbound TLS to Google, to every configured RPC, and to AWS
 # KMS when a signer is a key id. libssl3 is deliberately not named: nothing
