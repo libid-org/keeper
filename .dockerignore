@@ -1,0 +1,7 @@
+# The image builds from these three paths and nothing else, so allowlist them.
+# A local `docker build` otherwise ships target/ to the daemon — gigabytes,
+# for a build that recompiles from scratch inside the image anyway.
+*
+!Cargo.toml
+!Cargo.lock
+!src
