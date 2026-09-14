@@ -2,15 +2,16 @@
 name = "keeper"
 version = "0.2.0"
 edition = "2021"
-# Inherited floor: the notary lib dependency pulls the `tlsn` MPC graph
-# (TLSNotary alpha.15's `mpz` crates declare 1.95) and the AWS SDK crates via
-# libid-signer declare 1.94.1.
+# Inherited floor: libid-tlsn pulls the `tlsn` MPC graph (TLSNotary
+# alpha.15's `mpz` crates declare 1.95) and the AWS SDK crates via libid-signer
+# declare 1.94.1.
 rust-version = "1.95"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/libid-org/keeper"
 description = "Permissionless keeper that keeps Google's JWT signing keys trusted on chain: obtains MPC-TLS notarized readings of Google's JWKS from a libid notary and submits rotate() to GoogleJwtRoots on every configured network, paying the Notary Fee."
-# A binary + companion library, never a registry crate: it names `notary`
-# and the libid-rs crates (git-only sources), which cargo refuses to publish.
+# A binary + companion library, never a registry crate: it names git-only
+# libid-rs crates (libid-tlsn) and carries `[patch]` tables, which cargo
+# refuses to publish.
 publish = false
 
 [lib]
@@ -22,17 +23,12 @@ name = "keeper"
 path = "src/main.rs"
 
 [dependencies]
-
 # ── libid-rs shared crates ──────────────────────────────────────────────────
-# The SAME git rev the notary pins for its libid-rs crates, so cargo unifies
-# these with the copies arriving through `notary` -- mixing the crates.io
-# releases with the git copies would put two incompatible versions of the
-# same types in the graph (libid-tlsn is git-only and exposes sibling-crate
-# types; `NotarizedSession` is libid-transcript's `AttestationWire`). The rev
-# is the head of libid-rs `fix/origin-form-request-target`: the commit that
-# makes `prover_generic` put `GET /oauth2/v3/certs HTTP/1.1` on the wire,
-# which is the request line `GoogleJwtRoots` pins. Moves with the notary's
-# pin, never on its own; both return to the v0.3.0 tag once it exists.
+# The same tag the notary pins for its libid-rs crates, so a keeper and a
+# notary built from these manifests share one copy of every type: libid-tlsn
+# is git-only and exposes sibling-crate types, and `NotarizedSession` is
+# libid-transcript's `AttestationWire`, the frame both sides read and write.
+# Moves with the notary's pin, never on its own.
 libid-crypto = { git = "https://github.com/libid-org/libid-rs", tag = "v0.3.0" }
 libid-signer = { git = "https://github.com/libid-org/libid-rs", tag = "v0.3.0" }
 # The JWKS prover runs the MPC-TLS session itself (libid-tlsn), states its
@@ -78,6 +74,7 @@ tokio = { version = "1", features = [
     "rt-multi-thread",
     "macros",
     "net",
+    "io-util",
     "time",
     "signal",
 ] }
@@ -96,7 +93,8 @@ tempfile = "3"
 
 [patch."https://github.com/tlsnotary/tlsn"]
 # The notary's own patch, repeated here because `[patch]` is read from the
-# ROOT manifest only: a dependent of the notary does not inherit it, and
+# The notary carries the same pin; cargo ignores dependency-workspace patches,
+# so a crate that runs the prover repeats it. The two move together.
 # without it the keeper's prover would run upstream alpha.15 against a notary
 # running the patched tree. WIP: TLSNotary #1178 reclaims the channel and
 # #1179 preserves hash-opening order for multi-range commitments. Return to a

@@ -4,10 +4,11 @@
 //! The end-to-end test is everything but MPC-TLS itself: a real Anvil node,
 //! the real `NotaryService` / `GoogleJwtRoots` contracts deployed from
 //! libid-contracts' embedded artifacts, a local HTTP server standing in for
-//! Google's JWKS endpoint (serving Google's real body), and the notary
-//! crate's mock prover (which signs the exact record a real MPC-TLS session
-//! produces) as the proof source — wired through keeper.toml, not through
-//! test-only APIs, so the config surface is exercised too.
+//! Google's JWKS endpoint (serving Google's real body), and the keeper's own
+//! mock prover (`keeper::jwks::mock::MockProver`, which signs the exact
+//! record a real MPC-TLS session produces) as the proof source — wired
+//! through keeper.toml, not through test-only APIs, so the config surface is
+//! exercised too.
 
 use std::path::Path;
 

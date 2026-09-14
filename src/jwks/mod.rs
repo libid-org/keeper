@@ -17,7 +17,7 @@
 //! because a hidden range is where a second `Host` header or a decoy `"keys"`
 //! member would live.
 //!
-//! Prover entry points (library consumers, i.e. the keeper):
+//! Entry points:
 //!
 //! * [`prover::notarize_jwks`] -- the real one: runs the MPC-TLS prover
 //!   against a live notary over any async socket and reads the record back.
@@ -25,8 +25,6 @@
 //!   synthesizes the transcript the real session would have produced, and
 //!   signs the record with a caller-provided notary key. For end-to-end
 //!   contract testing.
-//!
-//! [`NotarizedSession`]: crate::NotarizedSession
 
 /// The record as the notary hands it back: the section 9.1 attested data and
 /// the notary's signature over it, and nothing else. An alias of
@@ -44,12 +42,6 @@ pub enum Error {
         /// Human-readable failure detail.
         detail: String,
     },
-    /// Socket I/O failed.
-    #[error("io: {0}")]
-    Io(#[from] std::io::Error),
-    /// JSON (de)serialization failed.
-    #[error("json: {0}")]
-    Json(#[from] serde_json::Error),
     /// MPC-TLS session driving failed.
     #[error(transparent)]
     Tlsn(#[from] libid_tlsn::Error),
@@ -62,9 +54,6 @@ pub enum Error {
     /// HTTP fetch failed (mock prover only).
     #[error("http: {0}")]
     Http(#[from] reqwest::Error),
-    /// Base64url decoding failed.
-    #[error("base64: {0}")]
-    Base64(#[from] base64::DecodeError),
 }
 
 /// Result alias for this module.
