@@ -178,15 +178,21 @@ jobs:
           python3 - local-dev.toml >> "$GITHUB_ENV" <<'PY'
           import sys, tomllib
 
-          identity = tomllib.load(open(sys.argv[1], "rb")).get("identity", {})
-          # The keeper's name for the contract, and the name the same entry
-          # carried before it became GoogleJwtRoots.
-          for key in ("google_jwt_roots", "identity_jwks_roots"):
-              if identity.get(key):
-                  print(f"KEEPER_E2E_GOOGLE_JWT_ROOTS={identity[key]}")
-                  break
-          else:
-              sys.exit(f"no roots address under [identity]: {sorted(identity)}")
+          # chain-configurations declares the ceremony contracts under
+          # [contracts]; the pre-0.10 schema carried the roots under
+          # [identity] as identity_jwks_roots. Read both so a schema that is
+          # still settling upstream cannot silently pick up nothing.
+          doc = tomllib.load(open(sys.argv[1], "rb"))
+          sections = {name: doc.get(name, {}) for name in ("contracts", "identity")}
+          for section, keys in sections.items():
+              for key in ("google_jwt_roots", "identity_jwks_roots"):
+                  if keys.get(key):
+                      print(f"KEEPER_E2E_GOOGLE_JWT_ROOTS={keys[key]}")
+                      sys.exit(0)
+          sys.exit(
+              "no roots address in the network file; "
+              + "; ".join(f"[{n}]: {sorted(k)}" for n, k in sections.items())
+          )
           PY
 
       - name: Rotate through the notary against live Google
