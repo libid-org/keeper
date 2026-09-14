@@ -120,6 +120,29 @@ jobs:
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
+      - name: Start the notary
+        run: |
+          set -euo pipefail
+          docker run -d --name notary -p 127.0.0.1:7047:7047 \
+            -e NOTARY_HOST=0.0.0.0 \
+            -e NOTARY_PORT=7047 \
+            -e NOTARY_WS_PORT=0 \
+            -e SIGNING_KEY="$NOTARY_KEY" \
+            "$NOTARY_IMAGE"
+          # The wire port accepts only once the signer is ready, so a connect
+          # is the readiness signal. It costs one aborted session in the
+          # notary's log, which is what its own HEALTHCHECK does every 30s.
+          for _ in $(seq 1 60); do
+            if (exec 3<>/dev/tcp/127.0.0.1/7047) 2>/dev/null; then
+              echo "the notary is listening"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::the notary did not come up"
+          docker logs notary
+          exit 1
+
       - name: Start the chain
         run: |
           set -euo pipefail
@@ -165,28 +188,6 @@ jobs:
           else:
               sys.exit(f"no roots address under [identity]: {sorted(identity)}")
           PY
-
-      - name: Start the notary
-        run: |
-          set -euo pipefail
-          docker run -d --name notary -p 127.0.0.1:7047:7047 \
-            -e NOTARY_HOST=0.0.0.0 \
-            -e NOTARY_PORT=7047 \
-            -e NOTARY_WS_PORT=0 \
-            -e SIGNING_KEY="$NOTARY_KEY" \
-            "$NOTARY_IMAGE"
-          # The wire port accepts only once the signer is ready, so a connect
-          # is the readiness signal.
-          for _ in $(seq 1 60); do
-            if (exec 3<>/dev/tcp/127.0.0.1/7047) 2>/dev/null; then
-              echo "the notary is listening"
-              exit 0
-            fi
-            sleep 1
-          done
-          echo "::error::the notary did not come up"
-          docker logs notary
-          exit 1
 
       - name: Rotate through the notary against live Google
         env:
