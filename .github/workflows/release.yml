@@ -18,7 +18,7 @@ env:
   RUSTFLAGS: "-D warnings"
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
-  RUST_VERSION: 1.97.1
+  RUST_VERSION: 1.98.1
   NIGHTLY: nightly-2026-08-10
   IMAGE: ghcr.io/${{ github.repository_owner }}/keeper
 

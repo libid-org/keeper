@@ -24,10 +24,10 @@ env:
   # Incremental state is written, cached and never read in CI — every job
   # starts from a restored cache and never rebuilds the same crate twice.
   CARGO_INCREMENTAL: 0
-  # The crate's rust-version floor (see Cargo.toml): building on exactly the
-  # floor keeps that claim honest, and a pinned toolchain cannot break CI
-  # mid-PR.
-  RUST_VERSION: 1.97.1
+  # The stable toolchain every job builds on, pinned so a new release cannot
+  # turn a PR red on its own. It is ABOVE the crate's rust-version floor (1.95,
+  # inherited — see Cargo.toml), which nothing here exercises.
+  RUST_VERSION: 1.98.1
   # Nightly is for `cargo +"$NIGHTLY" fmt` ONLY: rustfmt options like
   # `imports_granularity` are nightly-only, and stable rustfmt does not reject
   # them — it silently IGNORES them and reports success. Dated pin so a
