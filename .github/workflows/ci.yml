@@ -40,8 +40,8 @@ env:
   # The deploy tool that puts the contracts on the throwaway chain, and the
   # network file it converges that chain onto. Both belong to one
   # chain-configurations release and move together.
-  LIBID_DEPLOY_URL: https://github.com/libid-org/chain-configurations/releases/download/v0.7.0/libid-deploy-0.7.0-x86_64-unknown-linux-gnu.tar.gz
-  LIBID_DEPLOY_NETWORK_URL: https://raw.githubusercontent.com/libid-org/chain-configurations/v0.7.0/networks/local-dev.toml
+  LIBID_DEPLOY_URL: https://github.com/libid-org/chain-configurations/releases/download/v0.10.0/libid-deploy-0.10.0-x86_64-unknown-linux-gnu.tar.gz
+  LIBID_DEPLOY_NETWORK_URL: https://raw.githubusercontent.com/libid-org/chain-configurations/v0.10.0/networks/local-dev.toml
   # Anvil dev key #1. Public test material. The deployed NotaryService trusts
   # this key's address, so the notary must sign with it.
   NOTARY_KEY: 59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d
@@ -167,8 +167,12 @@ jobs:
           # honours only against anvil/hardhat; --confirm-fresh-deploy is
           # required while the factory has no code, which on a chain started
           # seconds ago is always.
+          # local-dev.toml names the compose service `anvil`; this job runs
+          # anvil as a bare host process, so the endpoint comes from the flag
+          # and the pinned file stays byte-identical to what was released.
           ./libid-deploy apply \
             --network local-dev.toml \
+            --rpc-url http://127.0.0.1:8545 \
             --signer "$DEPLOY_KEY" \
             --yes --confirm-fresh-deploy --dev
 
