@@ -33,6 +33,25 @@
 //! KEEPER_E2E_NOTARY=127.0.0.1:7047 cargo test --test e2e_real -- --ignored
 //! ```
 //!
+//! # The stack under test
+//!
+//! With nothing else set, the test deploys `NotaryService` and
+//! `GoogleJwtRoots` itself, on an anvil it spawns -- one command, no
+//! prerequisites. To drive a stack deployed OUTSIDE it, as CI does with
+//! `libid-deploy apply` against a plain anvil, name that stack instead:
+//!
+//! * `KEEPER_E2E_GOOGLE_JWT_ROOTS=0x…` -- the deployed roots proxy. Setting
+//!   it is what selects the external stack; nothing is deployed then.
+//! * `KEEPER_E2E_RPC=http://…` -- its chain. Defaults to
+//!   `http://127.0.0.1:8545`, where a plain `anvil` listens.
+//! * `KEEPER_E2E_NOTARY_SERVICE=0x…` -- the service the fee is paid to. Read
+//!   off `GoogleJwtRoots.notaryService()` when unset.
+//!
+//! An external stack must be fresh -- the test asserts a FIRST rotation --
+//! its Notary Service must trust the key the notary signs with, and Anvil's
+//! dev key #0 must be funded on its chain, since that key pays gas and the
+//! fee.
+//!
 //! `KEEPER_E2E_NOTARY_ADDRESS=0x…` overrides the trusted notary address when
 //! the notary signs with some other key. `KEEPER_E2E_CAPTURE=<path>` also
 //! writes the record the keeper obtained -- attested data, signature, the
@@ -42,7 +61,10 @@
 use std::path::Path;
 
 use alloy::{
-    node_bindings::Anvil,
+    node_bindings::{
+        Anvil,
+        AnvilInstance,
+    },
     primitives::{
         Address,
         U256,
@@ -82,7 +104,10 @@ const NOTARY_KEY: &str =
     "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
 /// The Notary Fee the service is deployed with. Non-zero so a rotation that
 /// forgot to attach it reverts, and so the fee's arrival can be asserted.
+/// An external stack sets its own; the fee is read off the chain either way.
 const NOTARY_FEE_WEI: u64 = 1_000;
+/// Where a plain `anvil` listens: the default chain for an external stack.
+const DEFAULT_RPC: &str = "http://127.0.0.1:8545";
 /// Google's live key set -- the same endpoint the notarized session reads.
 const GOOGLE_JWKS_URL: &str = "https://www.googleapis.com/oauth2/v3/certs";
 
@@ -104,14 +129,77 @@ fn notary_under_test() -> String {
 /// The address the deployed `NotaryService` trusts: Anvil #1 by default, or
 /// `KEEPER_E2E_NOTARY_ADDRESS` when the notary signs with another key.
 fn trusted_notary_address() -> Address {
-    match std::env::var("KEEPER_E2E_NOTARY_ADDRESS") {
-        Ok(hex) => hex
-            .parse()
-            .expect("KEEPER_E2E_NOTARY_ADDRESS is a 0x address"),
-        Err(_) => Address::from(pubkey_to_eth_address(
+    env_address("KEEPER_E2E_NOTARY_ADDRESS").unwrap_or_else(|| {
+        Address::from(pubkey_to_eth_address(
             hex_to_signing_key(NOTARY_KEY).unwrap().verifying_key(),
-        )),
+        ))
+    })
+}
+
+/// The `0x…` address in `var`, when it is set. A malformed one is a usage
+/// error, not a reason to fall back to a default nobody asked for.
+fn env_address(var: &str) -> Option<Address> {
+    std::env::var(var)
+        .ok()
+        .map(|hex| hex.parse().unwrap_or_else(|e| panic!("{var}: {e}")))
+}
+
+/// The chain the contracts live on. An external stack names its own RPC (or
+/// takes the default anvil endpoint); otherwise this test spawns the chain
+/// and holds it open for the run.
+fn chain_under_test(external: bool) -> (Option<AnvilInstance>, String) {
+    if external {
+        let rpc =
+            std::env::var("KEEPER_E2E_RPC").unwrap_or_else(|_| DEFAULT_RPC.to_string());
+        return (None, rpc);
     }
+    assert!(
+        std::env::var_os("KEEPER_E2E_RPC").is_none(),
+        "KEEPER_E2E_RPC names a chain but KEEPER_E2E_GOOGLE_JWT_ROOTS names \
+         no contract on it: set both to drive a deployed stack, or neither to \
+         deploy on a spawned anvil"
+    );
+    let anvil = Anvil::new().spawn();
+    let rpc = anvil.endpoint();
+    (Some(anvil), rpc)
+}
+
+/// Deploy the pair this test drives from libid-contracts' embedded artifacts:
+/// a `NotaryService` that trusts `notary` and charges [`NOTARY_FEE_WEI`], and
+/// the `GoogleJwtRoots` that verifies through it. Returns them in the order
+/// (roots, service).
+async fn deploy_stack<P: Provider>(
+    provider: &P,
+    owner: Address,
+    notary: Address,
+) -> (Address, Address) {
+    let artifacts = Artifacts::embedded();
+    let notary_service = deploy_behind_proxy(
+        provider,
+        &artifacts,
+        "NotaryService",
+        &NotaryService::initializeCall {
+            owner_: owner,
+            notary_: notary,
+            fee_: U256::from(NOTARY_FEE_WEI),
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    let jwt_roots = deploy_behind_proxy(
+        provider,
+        &artifacts,
+        "GoogleJwtRoots",
+        &GoogleJwtRoots::initializeCall {
+            owner_: owner,
+            notary_: notary_service,
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    (jwt_roots, notary_service)
 }
 
 /// The notary's `createdAt`: bytes 32..40 of the section 9.1 record,
@@ -126,7 +214,10 @@ async fn keeper_rotates_the_roots_through_a_real_notary() {
     let notary_addr = notary_under_test();
     let trusted = trusted_notary_address();
 
-    let anvil = Anvil::new().spawn();
+    // The stack: the one `KEEPER_E2E_GOOGLE_JWT_ROOTS` names, or one deployed
+    // here on a chain spawned for this run. `_anvil` holds that chain open.
+    let deployed = env_address("KEEPER_E2E_GOOGLE_JWT_ROOTS");
+    let (_anvil, rpc_url) = chain_under_test(deployed.is_some());
     let (wallet, deployer) = SignerSource::from_spec(GAS_KEY)
         .unwrap()
         .build_wallet(None)
@@ -134,37 +225,24 @@ async fn keeper_rotates_the_roots_through_a_real_notary() {
         .unwrap();
     let provider = ProviderBuilder::new()
         .wallet(wallet)
-        .connect(&anvil.endpoint())
+        .connect(&rpc_url)
         .await
         .unwrap();
-    let fee = U256::from(NOTARY_FEE_WEI);
 
-    let artifacts = Artifacts::embedded();
-    let notary_service = deploy_behind_proxy(
-        &provider,
-        &artifacts,
-        "NotaryService",
-        &NotaryService::initializeCall {
-            owner_: deployer,
-            notary_: trusted,
-            fee_: fee,
-        },
-        None,
-    )
-    .await
-    .unwrap();
-    let jwt_roots = deploy_behind_proxy(
-        &provider,
-        &artifacts,
-        "GoogleJwtRoots",
-        &GoogleJwtRoots::initializeCall {
-            owner_: deployer,
-            notary_: notary_service,
-        },
-        None,
-    )
-    .await
-    .unwrap();
+    let (jwt_roots, notary_service) = match deployed {
+        Some(jwt_roots) => {
+            let service = match env_address("KEEPER_E2E_NOTARY_SERVICE") {
+                Some(address) => address,
+                None => GoogleJwtRoots::new(jwt_roots, &provider)
+                    .notaryService()
+                    .call()
+                    .await
+                    .unwrap(),
+            };
+            (jwt_roots, service)
+        }
+        None => deploy_stack(&provider, deployer, trusted).await,
+    };
 
     // No mock: the keeper's cheap poll reads Google's live endpoint, and its
     // proof source is the notary over the wire.
@@ -176,9 +254,8 @@ async fn keeper_rotates_the_roots_through_a_real_notary() {
              notary_url = \"tcp://{notary_addr}\"\n\
              [[networks]]\n\
              name = \"anvil\"\n\
-             rpc_url = \"{rpc}\"\n\
-             google_jwt_roots = \"{jwt_roots}\"\n",
-            rpc = anvil.endpoint(),
+             rpc_url = \"{rpc_url}\"\n\
+             google_jwt_roots = \"{jwt_roots}\"\n"
         ),
     );
     let (config, networks) = KeeperConfig::load(&path).unwrap();
@@ -229,7 +306,26 @@ async fn keeper_rotates_the_roots_through_a_real_notary() {
     }
 
     let roots = GoogleJwtRoots::new(jwt_roots, &provider);
-    assert_eq!(roots.quoteRotation().call().await.unwrap(), fee);
+    // Both hold by construction when this test deployed the stack, and are
+    // the two ways an EXTERNAL one can be wrong: the fee would land in a
+    // service this contract does not verify through, or the notary's
+    // signature would recover to a key the service does not trust.
+    assert_eq!(
+        roots.notaryService().call().await.unwrap(),
+        notary_service,
+        "the roots contract verifies through another Notary Service"
+    );
+    assert!(
+        NotaryService::new(notary_service, &provider)
+            .isTrustedNotary(trusted)
+            .call()
+            .await
+            .unwrap(),
+        "the Notary Service does not trust {trusted}, the address the \
+         notary's signature recovers to"
+    );
+    // What one rotation costs, as the chain states it.
+    let fee = roots.quoteRotation().call().await.unwrap();
     let service_balance_before = provider.get_balance(notary_service).await.unwrap();
 
     // ── dry run: rotation needed, nothing submitted, no session ─────────────
