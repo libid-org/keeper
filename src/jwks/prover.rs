@@ -17,8 +17,7 @@ use crate::jwks::{
 /// What the reading calls itself. The keeper is the process Google sees, and
 /// this prover is the keeper's; the version is this crate's, because the prover
 /// ships in it. Nothing verifies the value -- the contract pins the request
-/// line and the `Host` header, not the agent -- and the mock sends
-/// `libid-keeper/mock` in the same slot.
+/// line and the `Host` header, not the agent.
 const USER_AGENT: &str = concat!("libid-keeper/", env!("CARGO_PKG_VERSION"));
 
 /// Run the MPC-TLS prover for a JWKS reading over `socket` (connected to a

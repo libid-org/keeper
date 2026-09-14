@@ -54,13 +54,6 @@ pub struct KeeperConfig {
     /// shape via `libid_signer::SignerSource::from_spec`.
     #[serde(default)]
     pub signer: Option<String>,
-    /// TEST-ONLY seam: skip MPC-TLS and build notarized sessions with
-    /// [`crate::jwks::mock::MockProver`] signing with this key. The chain
-    /// accepts them only where this key IS a notary the Notary Service
-    /// trusts, which is never true of a production deployment. Refused
-    /// alongside `notary_url`.
-    #[serde(default)]
-    pub mock_notary: Option<MockNotary>,
     /// The networks to keep fresh.
     #[serde(default)]
     pub networks: Vec<NetworkEntry>,
@@ -72,18 +65,6 @@ fn default_poll_interval() -> u64 {
 
 fn default_renewal_threshold() -> u64 {
     DEFAULT_RENEWAL_THRESHOLD_SECS
-}
-
-/// `[mock_notary]` — the test seam. See [`KeeperConfig::mock_notary`].
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct MockNotary {
-    /// Hex secp256k1 key the mock proof is signed with.
-    pub signing_key: String,
-    /// Override the JWKS URL the mock prover fetches (defaults to Google's
-    /// live endpoint; tests point it at a local fixture server).
-    #[serde(default)]
-    pub jwks_url: Option<String>,
 }
 
 /// One `[[networks]]` entry, before resolution. Either inline or by
@@ -146,12 +127,6 @@ impl KeeperConfig {
     /// Resolve every `[[networks]]` entry against `base` (the directory the
     /// keeper.toml lives in).
     pub fn resolve_networks(&self, base: &Path) -> Result<Vec<ResolvedNetwork>> {
-        if self.notary_url.is_some() && self.mock_notary.is_some() {
-            bail!(
-                "both notary_url and [mock_notary] are set — the mock is a test \
-                 seam, not a fallback; configure exactly one proof source"
-            );
-        }
         if self.networks.is_empty() {
             bail!("no [[networks]] configured");
         }

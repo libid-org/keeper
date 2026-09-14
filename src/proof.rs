@@ -1,26 +1,16 @@
-//! Obtaining a [`NotarizedSession`] — the notarized reading of Google's JWKS.
-//!
-//! The production path is the real thing: an MPC-TLS session against a
-//! running libid notary's TCP wire port, driven by this crate's own
-//! prover-side helpers ([`crate::jwks::prover::notarize_jwks`]). The mock
-//! path exists for end-to-end tests only (see
-//! [`crate::config::KeeperConfig::mock_notary`]). Both hand back the same
-//! record — the section 9.1 bytes and the notary's signature over them —
-//! which is exactly what `GoogleJwtRoots.rotate` takes.
+//! Obtaining a [`NotarizedSession`] — the notarized reading of Google's JWKS:
+//! an MPC-TLS session against a running libid notary's TCP wire port, driven
+//! by this crate's own prover-side helpers
+//! ([`crate::jwks::prover::notarize_jwks`]). What comes back is the section
+//! 9.1 bytes and the notary's signature over them — exactly what
+//! `GoogleJwtRoots.rotate` takes.
 
-use crate::jwks::{
-    mock::{
-        MockProver,
-        MockProverConfig,
-    },
-    NotarizedSession,
-};
+use crate::jwks::NotarizedSession;
 use anyhow::{
     bail,
     Context,
     Result,
 };
-use libid_crypto::hex_to_signing_key;
 use tokio::net::TcpStream;
 use tracing::info;
 
@@ -31,19 +21,10 @@ use crate::config::KeeperConfig;
 pub enum ProofSource {
     /// A libid notary's TCP wire port (`host:port`).
     Notary(String),
-    /// TEST-ONLY: mock sessions signed with a local key, JWKS fetched over
-    /// plain TLS (optionally from an overridden URL).
-    Mock {
-        /// Hex secp256k1 signing key.
-        signing_key: String,
-        /// JWKS URL override.
-        jwks_url: Option<String>,
-    },
 }
 
 impl ProofSource {
-    /// Derive the proof source from config; errors when neither (or both —
-    /// caught at config load) is set.
+    /// Derive the proof source from config; errors when `notary_url` is unset.
     pub fn from_config(config: &KeeperConfig) -> Result<Self> {
         if let Some(url) = &config.notary_url {
             let addr = url
@@ -54,12 +35,6 @@ impl ProofSource {
                 bail!("notary_url '{url}' is not tcp://host:port");
             }
             return Ok(Self::Notary(addr.to_string()));
-        }
-        if let Some(mock) = &config.mock_notary {
-            return Ok(Self::Mock {
-                signing_key: mock.signing_key.clone(),
-                jwks_url: mock.jwks_url.clone(),
-            });
         }
         bail!(
             "no proof source is configured — set notary_url (or use --dry-run to \
@@ -84,26 +59,6 @@ impl ProofSource {
                 );
                 Ok(session)
             }
-            Self::Mock {
-                signing_key,
-                jwks_url,
-            } => {
-                info!("building MOCK notarized session (test seam, no MPC-TLS)");
-                let key = hex_to_signing_key(signing_key)
-                    .map_err(|e| anyhow::anyhow!("mock_notary.signing_key: {e}"))?;
-                let mut prover = MockProver::new(
-                    key,
-                    MockProverConfig {
-                        jwks_url: jwks_url.clone(),
-                        ..MockProverConfig::default()
-                    },
-                );
-                let session = prover
-                    .build_session()
-                    .await
-                    .context("mock session construction failed")?;
-                Ok(session)
-            }
         }
     }
 }
@@ -111,7 +66,6 @@ impl ProofSource {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::MockNotary;
 
     fn base_config() -> KeeperConfig {
         toml::from_str("").unwrap()
@@ -124,10 +78,8 @@ mod tests {
                 notary_url: Some(url.into()),
                 ..base_config()
             };
-            match ProofSource::from_config(&config).unwrap() {
-                ProofSource::Notary(addr) => assert_eq!(addr, "127.0.0.1:7047"),
-                other => panic!("expected notary source, got {other:?}"),
-            }
+            let ProofSource::Notary(addr) = ProofSource::from_config(&config).unwrap();
+            assert_eq!(addr, "127.0.0.1:7047");
         }
     }
 
@@ -143,20 +95,5 @@ mod tests {
     #[test]
     fn missing_proof_source_is_an_error() {
         assert!(ProofSource::from_config(&base_config()).is_err());
-    }
-
-    #[test]
-    fn mock_notary_is_selected_when_configured() {
-        let config = KeeperConfig {
-            mock_notary: Some(MockNotary {
-                signing_key: "ab".repeat(32),
-                jwks_url: Some("http://127.0.0.1:1/certs".into()),
-            }),
-            ..base_config()
-        };
-        assert!(matches!(
-            ProofSource::from_config(&config).unwrap(),
-            ProofSource::Mock { .. }
-        ));
     }
 }

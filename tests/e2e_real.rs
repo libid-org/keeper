@@ -1,18 +1,18 @@
 //! The whole loop for real: a running notary, the real contracts on Anvil,
 //! Google's live JWKS, and one genuine MPC-TLS rotation.
 //!
-//! `e2e.rs` proves everything but MPC-TLS, with the mock prover as the proof
-//! source. This test proves the rest: the keeper's prover runs a real session
-//! against `www.googleapis.com` through a notary it does not share a crate
-//! with, reads the signed record back off the wire, and `GoogleJwtRoots`
-//! accepts it. It is `#[ignore]`d because it needs two things CI does not
-//! have by default -- a notary to talk to and network to Google.
+//! The only test that drives a rotation: the keeper's prover runs a real
+//! session against `www.googleapis.com` through a notary it does not share a
+//! crate with, reads the signed record back off the wire, and
+//! `GoogleJwtRoots` accepts it. It is `#[ignore]`d because it needs two
+//! things a plain `cargo test` does not have -- a notary to talk to and
+//! network to Google -- so CI runs it in a job of its own.
 //!
 //! # Running it
 //!
 //! Start a notary signing with Anvil's dev key #1 (the key the deployed
-//! `NotaryService` is initialized to trust, as in `e2e.rs`), either from a
-//! checkout of libid-org/notary:
+//! `NotaryService` is initialized to trust), either from a checkout of
+//! libid-org/notary:
 //!
 //! ```sh
 //! notary --port 7047 --ws-port 0 \
@@ -102,8 +102,7 @@ use libid_signer::SignerSource;
 /// Anvil's dev key #0 -- pays gas and the Notary Fee.
 const GAS_KEY: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 /// Anvil's dev key #1 -- the key the notary under test is expected to sign
-/// with, so the deployed `NotaryService` trusts it. Same convention as the
-/// mock in `e2e.rs`.
+/// with, so the deployed `NotaryService` trusts it.
 const NOTARY_KEY: &str =
     "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
 /// The Notary Fee the service is deployed with. Non-zero so a rotation that
@@ -248,8 +247,8 @@ async fn keeper_rotates_the_roots_through_a_real_notary() {
         None => deploy_stack(&provider, deployer, trusted).await,
     };
 
-    // No mock: the keeper's cheap poll reads Google's live endpoint, and its
-    // proof source is the notary over the wire.
+    // The keeper's cheap poll reads Google's live endpoint, and its proof
+    // source is the notary over the wire.
     let dir = tempfile::tempdir().unwrap();
     let path = write_keeper_toml(
         dir.path(),

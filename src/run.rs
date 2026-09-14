@@ -76,17 +76,13 @@ pub fn check_can_submit(
     Ok(())
 }
 
-/// Fetch the live JWKS over plain HTTPS — Google's endpoint, unless the
-/// mock-notary test seam overrides the URL. The poll and the proof must read
-/// the SAME endpoint: otherwise the verdicts are about one key set and the
-/// submitted claims attest another.
-async fn fetch_google_keys(config: &KeeperConfig) -> Result<Vec<GoogleKey>> {
-    let url = config
-        .mock_notary
-        .as_ref()
-        .and_then(|mock| mock.jwks_url.as_deref())
-        .unwrap_or(decision::GOOGLE_JWKS_URL);
-    let body = reqwest::get(url)
+/// Fetch the live JWKS over plain HTTPS from Google's endpoint. The poll and
+/// the proof must read the SAME endpoint, or the verdicts are about one key
+/// set and the submitted claims attest another: [`decision::GOOGLE_JWKS_URL`]
+/// is the URL `jwks::request` targets, and a test there holds the two
+/// together.
+async fn fetch_google_keys() -> Result<Vec<GoogleKey>> {
+    let body = reqwest::get(decision::GOOGLE_JWKS_URL)
         .await
         .context("fetching Google's JWKS")?
         .error_for_status()
@@ -108,7 +104,7 @@ pub async fn tick(
 ) -> TickOutcome {
     let mut outcome = TickOutcome::default();
 
-    let google_keys = match fetch_google_keys(config).await {
+    let google_keys = match fetch_google_keys().await {
         Ok(keys) => keys,
         Err(e) => {
             warn!(error = %e, "tick aborted: could not fetch Google's JWKS");
@@ -267,7 +263,7 @@ async fn submit_to(network: &ResolvedNetwork, calldata: Vec<u8>) -> Result<()> {
 /// on-chain verdict. Returns an error when any network read fails; a stale
 /// chain is NOT an error (that is what the keeper is for).
 pub async fn status(config: &KeeperConfig, networks: &[ResolvedNetwork]) -> Result<()> {
-    let google_keys = fetch_google_keys(config).await?;
+    let google_keys = fetch_google_keys().await?;
     println!(
         "{:<16} {:<46} {:<12} verdict",
         "network", "kid", "expires-in"

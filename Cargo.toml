@@ -31,16 +31,11 @@ path = "src/main.rs"
 # Moves with the notary's pin, never on its own.
 libid-crypto = { git = "https://github.com/libid-org/libid-rs", tag = "v0.4.0" }
 libid-signer = { git = "https://github.com/libid-org/libid-rs", tag = "v0.4.0" }
-# The JWKS prover runs the MPC-TLS session itself (libid-tlsn), states its
-# layout and reads the frame back (libid-transcript), and the mock encodes the
-# record (libid-ceremony). All at the same tag, or cargo carries two copies of
-# the types.
+# The JWKS prover runs the MPC-TLS session itself (libid-tlsn), and states
+# its layout and reads the frame back (libid-transcript). Both at the same
+# tag, or cargo carries two copies of the types.
 libid-tlsn = { git = "https://github.com/libid-org/libid-rs", tag = "v0.4.0" }
 libid-transcript = { git = "https://github.com/libid-org/libid-rs", tag = "v0.4.0" }
-libid-ceremony = { git = "https://github.com/libid-org/libid-rs", tag = "v0.4.0" }
-# The mock signs with a `k256::SigningKey` and hands it to libid-crypto:
-# 0.13 is libid-rs's line, and 0.14 here would be a second, incompatible type.
-k256 = { version = "0.13", features = ["ecdsa"] }
 
 # ── contract bindings + deploy helpers ──────────────────────────────────────
 # The registry crate is fine here: it has no tlsn-adjacent types. Its
@@ -89,9 +84,6 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
-# The mock prover pins its request bytes against hyper's own encoder.
-hyper = { version = "1", features = ["client", "http1"] }
-hyper-util = { version = "0.1", features = ["tokio"] }
 alloy = { version = "1", features = ["node-bindings"] }
 tempfile = "3"
 

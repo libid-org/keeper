@@ -17,14 +17,8 @@
 //! because a hidden range is where a second `Host` header or a decoy `"keys"`
 //! member would live.
 //!
-//! Entry points:
-//!
-//! * [`prover::notarize_jwks`] -- the real one: runs the MPC-TLS prover
-//!   against a live notary over any async socket and reads the record back.
-//! * [`mock::MockProver`] -- fetches the JWKS over plain TLS (no MPC),
-//!   synthesizes the transcript the real session would have produced, and
-//!   signs the record with a caller-provided notary key. For end-to-end
-//!   contract testing.
+//! The entry point is [`prover::notarize_jwks`]: it runs the MPC-TLS prover
+//! against a live notary over any async socket and reads the record back.
 
 /// The record as the notary hands it back: the section 9.1 attested data and
 /// the notary's signature over it, and nothing else. An alias of
@@ -35,8 +29,7 @@ pub type NotarizedSession = libid_transcript::AttestationWire;
 /// Errors from building or obtaining a JWKS reading.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    /// The reading could not be built: request construction, or the mock
-    /// prover's synthesized record.
+    /// The reading could not be built: request construction.
     #[error("jwks: {detail}")]
     Jwks {
         /// Human-readable failure detail.
@@ -51,15 +44,11 @@ pub enum Error {
     /// Crypto primitive failure.
     #[error(transparent)]
     Crypto(#[from] libid_crypto::Error),
-    /// HTTP fetch failed (mock prover only).
-    #[error("http: {0}")]
-    Http(#[from] reqwest::Error),
 }
 
 /// Result alias for this module.
 pub type Result<T> = std::result::Result<T, Error>;
 
-pub mod mock;
 pub mod prover;
 
 use libid_tlsn::{
@@ -120,9 +109,7 @@ pub fn layout(sent: &[u8], recv: &[u8]) -> (Layout, Layout) {
 /// ```
 ///
 /// `connection: close` makes the server delimit the response, so the prover
-/// reads to EOF and the transcript ends where the body does. The mock prover
-/// synthesizes these same bytes from this same request, and a test drives
-/// hyper's encoder to keep the two honest.
+/// reads to EOF and the transcript ends where the body does.
 pub(crate) fn request(user_agent: &str) -> Result<HttpRequest<HttpBody<Bytes>>> {
     HttpRequest::builder()
         .method("GET")
@@ -196,5 +183,15 @@ mod tests {
             ("user-agent", b"libid-keeper/test"),
         ];
         assert_eq!(headers, expected);
+    }
+
+    /// The poll (`run::fetch_google_keys`) and the notarized session must
+    /// read ONE endpoint, or the verdicts describe one key set and the record
+    /// attests another. The poll fetches `decision::GOOGLE_JWKS_URL`; this is
+    /// what the session requests.
+    #[test]
+    fn the_request_targets_the_url_the_poll_reads() {
+        let request = request("libid-keeper/test").unwrap();
+        assert_eq!(request.uri().to_string(), crate::decision::GOOGLE_JWKS_URL);
     }
 }
