@@ -62,8 +62,8 @@ impl ProofSource {
             });
         }
         bail!(
-            "a rotation is needed but no proof source is configured — set \
-             notary_url (or run with --dry-run to only report)"
+            "no proof source is configured — set notary_url (or use --dry-run to \
+             only report)"
         );
     }
 

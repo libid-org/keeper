@@ -49,6 +49,33 @@ impl TickOutcome {
     }
 }
 
+/// Refuse to start a submitting keeper (`run` / `once` without `--dry-run`)
+/// on a config that can only fail later. A missing proof source or gas
+/// signer surfaces only when a rotation is due, which may be weeks after the
+/// deployment went "healthy" — so a deployment learns about it now, at
+/// startup, with the same message it would otherwise meet in a warning at
+/// 3am. Nothing here touches the network: signer specs are classified by
+/// shape, so a KMS id passes without credentials.
+pub fn check_can_submit(
+    config: &KeeperConfig,
+    networks: &[ResolvedNetwork],
+) -> Result<()> {
+    ProofSource::from_config(config)?;
+    for network in networks {
+        let spec = network.signer.as_deref().with_context(|| {
+            format!(
+                "network '{}' has no gas signer — set `signer` at the top level or \
+                 on the network entry (or use --dry-run to only report)",
+                network.name
+            )
+        })?;
+        SignerSource::from_spec(spec).map_err(|e| {
+            anyhow::anyhow!("network '{}' gas signer spec: {e}", network.name)
+        })?;
+    }
+    Ok(())
+}
+
 /// Fetch the live JWKS over plain HTTPS — Google's endpoint, unless the
 /// mock-notary test seam overrides the URL. The poll and the proof must read
 /// the SAME endpoint: otherwise the verdicts are about one key set and the
@@ -297,5 +324,60 @@ fn human_secs(secs: u64) -> String {
     } else {
         let mins = (secs % 3_600) / 60;
         format!("{hours}h{mins}m")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloy::primitives::Address;
+
+    use super::*;
+
+    fn network(signer: Option<&str>) -> ResolvedNetwork {
+        ResolvedNetwork {
+            name: "n".into(),
+            rpc_url: "http://127.0.0.1:1".into(),
+            signer: signer.map(str::to_string),
+            google_jwt_roots: Address::ZERO,
+        }
+    }
+
+    fn config(notary_url: Option<&str>) -> KeeperConfig {
+        KeeperConfig {
+            notary_url: notary_url.map(str::to_string),
+            ..toml::from_str("").unwrap()
+        }
+    }
+
+    #[test]
+    fn submitting_needs_a_proof_source() {
+        let err = check_can_submit(&config(None), &[network(Some(&"ab".repeat(32)))])
+            .unwrap_err();
+        assert!(err.to_string().contains("notary_url"), "{err:#}");
+    }
+
+    #[test]
+    fn submitting_needs_a_gas_signer_on_every_network() {
+        let networks = [network(Some(&"ab".repeat(32))), network(None)];
+        let err = check_can_submit(&config(Some("tcp://127.0.0.1:7047")), &networks)
+            .unwrap_err();
+        assert!(err.to_string().contains("no gas signer"), "{err:#}");
+    }
+
+    #[test]
+    fn a_malformed_signer_spec_is_refused_up_front() {
+        let networks = [network(Some("0xabc"))];
+        let err = check_can_submit(&config(Some("tcp://127.0.0.1:7047")), &networks)
+            .unwrap_err();
+        assert!(err.to_string().contains("gas signer spec"), "{err:#}");
+    }
+
+    #[test]
+    fn a_notary_and_a_signer_per_network_pass() {
+        let networks = [
+            network(Some(&"ab".repeat(32))),
+            network(Some("alias/keeper-gas")),
+        ];
+        check_can_submit(&config(Some("tcp://127.0.0.1:7047")), &networks).unwrap();
     }
 }
