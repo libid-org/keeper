@@ -33,6 +33,14 @@ env:
   # them — it silently IGNORES them and reports success. Dated pin so a
   # nightly formatting change cannot turn the tree red overnight.
   NIGHTLY: nightly-2026-08-10
+  # The notary the e2e job talks to, built from source rather than pulled: the
+  # published image predates the ceremony-attestation TCP path this test
+  # drives. Bump when libid-org/notary releases an image that carries it.
+  NOTARY_REPO: libid-org/notary
+  NOTARY_REV: c6e1e606c823413bbde86b0c7b7192ce336cc94f
+  # Anvil dev key #1. Public test material. The e2e deploys a NotaryService
+  # that trusts this key's address, so the notary must sign with it.
+  NOTARY_KEY: 59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -75,6 +83,82 @@ jobs:
 
       - name: Tests
         run: cargo test --all
+
+  # ---------------------------------------------------------------------------
+  # E2E: the rotation path for real — a running notary, the real contracts on
+  # a throwaway chain, and Google's LIVE key set.
+  #
+  # `cargo test --all` in the `rust` job covers everything but MPC-TLS, with
+  # the mock prover standing in. This job covers the rest, so the two together
+  # leave no part of the path unproven. It reaches www.googleapis.com on
+  # purpose: GoogleJwtRoots pins that authority, so a local TLS fixture cannot
+  # stand in for it.
+  # ---------------------------------------------------------------------------
+  e2e:
+    name: E2E (live Google)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      # anvil: the test spawns its own chain and deploys the real
+      # NotaryService and GoogleJwtRoots from libid-contracts' artifacts.
+      - uses: foundry-rs/foundry-toolchain@908c540300062bd5a7e473851cdb4282204cee09 # v1.9.1
+        with:
+          version: stable
+
+      - name: Check out the notary
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.NOTARY_REPO }}
+          ref: ${{ env.NOTARY_REV }}
+          path: .notary
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: |
+            . -> target
+            .notary -> target
+
+      - name: Build the notary
+        working-directory: .notary
+        # RUSTFLAGS is cleared deliberately: the repo-wide `-D warnings` is a
+        # gate on THIS crate, and applying it to another repo's tree would
+        # fail this job on a warning nobody here can fix.
+        env:
+          RUSTFLAGS: ""
+        run: cargo build --release --locked --bin notary
+
+      - name: Start the notary
+        working-directory: .notary
+        run: |
+          set -euo pipefail
+          ./target/release/notary \
+            --host 127.0.0.1 --port 7047 --ws-port 0 \
+            --signing-key "$NOTARY_KEY" > notary.log 2>&1 &
+          for _ in $(seq 1 30); do
+            if grep -q "listening on 127.0.0.1:7047" notary.log; then
+              grep -m1 "signer ready" notary.log
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "the notary did not come up:"
+          cat notary.log
+          exit 1
+
+      - name: Rotate through the notary against live Google
+        env:
+          KEEPER_E2E_NOTARY: 127.0.0.1:7047
+        run: cargo test --test e2e_real -- --ignored --nocapture
+
+      - name: Notary log
+        if: always()
+        run: cat .notary/notary.log || true
 
   # ---------------------------------------------------------------------------
   # DCO: every commit carries a Signed-off-by trailer, as CONTRIBUTING.md
