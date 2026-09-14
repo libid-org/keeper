@@ -36,7 +36,7 @@ env:
   # The notary the e2e job talks to: the PUBLISHED image, pulled not built, so
   # the rotation is proven against the same binary a deployment runs. One line
   # to bump.
-  NOTARY_IMAGE: ghcr.io/libid-org/notary:custom-1f54c19
+  NOTARY_IMAGE: ghcr.io/libid-org/notary:custom-c957999
   # The deploy tool that puts the contracts on the throwaway chain, and the
   # network file it converges that chain onto. Both belong to one
   # chain-configurations release and move together.
