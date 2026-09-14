@@ -3846,7 +3846,6 @@ dependencies = [
  "alloy",
  "anyhow",
  "base64 0.22.1",
- "chrono",
  "clap",
  "hex",
  "hyper 1.11.0",

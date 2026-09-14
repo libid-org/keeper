@@ -83,11 +83,9 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
-# The mock prover pins its request bytes against hyper's own encoder; the
-# example stamps its output in RFC 3339.
+# The mock prover pins its request bytes against hyper's own encoder.
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
-chrono = { version = "0.4", default-features = false, features = ["clock"] }
 alloy = { version = "1", features = ["node-bindings"] }
 tempfile = "3"
 
