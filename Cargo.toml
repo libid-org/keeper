@@ -92,13 +92,11 @@ alloy = { version = "1", features = ["node-bindings"] }
 tempfile = "3"
 
 [patch."https://github.com/tlsnotary/tlsn"]
-# The notary's own patch, repeated here because `[patch]` is read from the
-# The notary carries the same pin; cargo ignores dependency-workspace patches,
-# so a crate that runs the prover repeats it. The two move together.
-# without it the keeper's prover would run upstream alpha.15 against a notary
-# running the patched tree. WIP: TLSNotary #1178 reclaims the channel and
-# #1179 preserves hash-opening order for multi-range commitments. Return to a
-# release tag when both ship -- in lockstep with the notary.
+# The same TLSNotary fork pin the notary carries (#1178 reclaims the session
+# channel, #1179 preserves hash-opening order, #1173 splits the RCOT
+# instances). Cargo reads `[patch]` from the root manifest only, so a crate
+# that runs the prover repeats it rather than inheriting it. The two move
+# together; both return to a release tag once upstream ships all three.
 tlsn = { git = "https://github.com/libid-org/tlsn", rev = "550220ee18a8c0bb60217d58cb73f5fd2e74e441" }
 
 # TLSNotary #1173 (per-consumer RCOT instances) needs KOS instance-domain
