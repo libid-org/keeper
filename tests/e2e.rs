@@ -99,6 +99,54 @@ fn network_file_reference_resolves_the_chain_configurations_schema() {
     );
 }
 
+/// chain-configurations 0.10 renamed the field and moved its section:
+/// `[identity].identity_jwks_roots` became `[contracts].google_jwt_roots`,
+/// and `[identity]` went away. A keeper has to serve files from both eras,
+/// so both spellings resolve to the same address.
+#[test]
+fn network_file_reads_both_spellings_of_the_roots_address() {
+    const ADDRESS: &str = "0xb7a2ce28e71dbb9c877d2b5a48de33b5f0e6838d";
+    let cases = [
+        (
+            "contracts",
+            format!("[contracts]\ngoogle_jwt_roots = \"{ADDRESS}\"\n"),
+        ),
+        (
+            "identity",
+            format!("[identity]\nidentity_jwks_roots = \"{ADDRESS}\"\n"),
+        ),
+    ];
+
+    for (era, section) in cases {
+        let dir = tempfile::tempdir().unwrap();
+        let network_file = dir.path().join("local-dev.toml");
+        std::fs::write(
+            &network_file,
+            format!(
+                "[network]\nname = \"local-dev\"\nrpc_url = \"http://127.0.0.1:8545\"\n\n{section}"
+            ),
+        )
+        .unwrap();
+        let path = write_keeper_toml(
+            dir.path(),
+            &format!(
+                "[[networks]]\nnetwork_file = \"{}\"\n",
+                network_file.display()
+            ),
+        );
+
+        let (_, networks) = KeeperConfig::load(&path)
+            .unwrap_or_else(|e| panic!("{era} era should resolve: {e:#}"));
+        assert_eq!(networks.len(), 1, "{era}");
+        assert_eq!(networks[0].name, "local-dev", "{era}");
+        assert_eq!(
+            networks[0].google_jwt_roots,
+            ADDRESS.parse::<alloy::primitives::Address>().unwrap(),
+            "{era}"
+        );
+    }
+}
+
 /// The mock is a test seam, not a fallback: configuring it alongside a real
 /// notary is refused at load.
 #[test]

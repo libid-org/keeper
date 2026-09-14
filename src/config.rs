@@ -2,11 +2,12 @@
 //!
 //! A network is configured either INLINE (`name` + `rpc_url` + contract
 //! addresses) or BY REFERENCE to a chain-configurations network file
-//! (`network_file = "networks/eden-testnet.toml"`). The referenced file uses
-//! the exact TOML schema of the `libid-org/chain-configurations` repo, which
-//! is the source of truth for deployed contract addresses — the keeper reads
-//! only the fields it needs and ignores the rest, so schema additions over
-//! there never break a keeper deployment.
+//! (`network_file = "networks/eden-testnet.toml"`). That repo is the source of
+//! truth for deployed contract addresses; the keeper reads only the fields it
+//! needs and ignores the rest, so additions over there do not break a keeper.
+//! Renames do, so the keeper accepts both spellings of the one field it wants:
+//! `[contracts].google_jwt_roots` (0.10 and later) and
+//! `[identity].identity_jwks_roots` (before it).
 
 use std::{
     collections::HashSet,
@@ -244,16 +245,24 @@ fn parse_roots(value: Option<&str>, network: &str) -> Result<Option<Address>> {
 }
 
 // ── chain-configurations network files ──────────────────────────────────────
-// A LENIENT mirror of the schema in libid-org/chain-configurations (see
+// A LENIENT mirror of libid-org/chain-configurations' network-file schema (see
 // bin/libid-deploy/src/config.rs there): only the fields the keeper consumes
-// are declared and unknown fields are ignored, so that repo can evolve its
-// schema without breaking keepers. That repo remains the source of truth for
-// what is deployed where.
+// are declared and unknown fields are ignored. That repo remains the source of
+// truth for what is deployed where.
+//
+// Leniency does not extend to renames, and there has been one: the address
+// moved from `[identity].identity_jwks_roots` to `[contracts].google_jwt_roots`
+// in chain-configurations 0.10, which also dropped `[identity]` entirely. Both
+// spellings are read, newest first, so one keeper serves files from either era.
 
 /// The subset of a chain-configurations network file the keeper reads.
 #[derive(Debug, Clone, Deserialize)]
 struct NetworkFile {
     network: NetworkFileNetwork,
+    /// `[contracts]` — chain-configurations 0.10 and later.
+    #[serde(default)]
+    contracts: Option<NetworkFileContracts>,
+    /// `[identity]` — pre-0.10 files only.
     #[serde(default)]
     identity: Option<NetworkFileIdentity>,
 }
@@ -265,11 +274,18 @@ struct NetworkFileNetwork {
     rpc_url: String,
 }
 
-/// `[identity]` — absent section = identity stack not wanted.
+/// `[contracts]` — absent section = nothing deployed on that network yet.
+#[derive(Debug, Clone, Deserialize)]
+struct NetworkFileContracts {
+    #[serde(default)]
+    google_jwt_roots: Option<String>,
+}
+
+/// `[identity]`, pre-0.10 only — absent section = identity stack not wanted.
 #[derive(Debug, Clone, Deserialize)]
 struct NetworkFileIdentity {
     #[serde(default)]
-    google_jwt_roots: Option<String>,
+    identity_jwks_roots: Option<String>,
 }
 
 /// A network file plus the address extracted from it (`None` when the file
@@ -285,13 +301,18 @@ impl NetworkFile {
             .with_context(|| format!("reading network file {}", path.display()))?;
         let parsed: Self = toml::from_str(&text)
             .with_context(|| format!("parsing network file {}", path.display()))?;
-        let google_jwt_roots = parse_roots(
-            parsed
-                .identity
-                .as_ref()
-                .and_then(|i| i.google_jwt_roots.as_deref()),
-            &parsed.network.name,
-        )?;
+        // 0.10+ first, then the pre-0.10 spelling.
+        let raw = parsed
+            .contracts
+            .as_ref()
+            .and_then(|c| c.google_jwt_roots.as_deref())
+            .or_else(|| {
+                parsed
+                    .identity
+                    .as_ref()
+                    .and_then(|i| i.identity_jwks_roots.as_deref())
+            });
+        let google_jwt_roots = parse_roots(raw, &parsed.network.name)?;
         Ok(ParsedNetworkFile {
             network: parsed.network,
             google_jwt_roots,
