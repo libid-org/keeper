@@ -33,14 +33,21 @@ env:
   # them — it silently IGNORES them and reports success. Dated pin so a
   # nightly formatting change cannot turn the tree red overnight.
   NIGHTLY: nightly-2026-08-10
-  # The notary the e2e job talks to, built from source rather than pulled: the
-  # published image predates the ceremony-attestation TCP path this test
-  # drives. Bump when libid-org/notary releases an image that carries it.
-  NOTARY_REPO: libid-org/notary
-  NOTARY_REV: c6e1e606c823413bbde86b0c7b7192ce336cc94f
-  # Anvil dev key #1. Public test material. The e2e deploys a NotaryService
-  # that trusts this key's address, so the notary must sign with it.
+  # The notary the e2e job talks to: the PUBLISHED image, pulled not built, so
+  # the rotation is proven against the same binary a deployment runs. One line
+  # to bump.
+  NOTARY_IMAGE: ghcr.io/libid-org/notary:custom-5f064fb
+  # The deploy tool that puts the contracts on the throwaway chain, and the
+  # network file it converges that chain onto. Both belong to one
+  # chain-configurations release and move together.
+  LIBID_DEPLOY_URL: https://github.com/libid-org/chain-configurations/releases/download/v0.7.0/libid-deploy-0.7.0-x86_64-unknown-linux-gnu.tar.gz
+  LIBID_DEPLOY_NETWORK_URL: https://raw.githubusercontent.com/libid-org/chain-configurations/v0.7.0/networks/local-dev.toml
+  # Anvil dev key #1. Public test material. The deployed NotaryService trusts
+  # this key's address, so the notary must sign with it.
   NOTARY_KEY: 59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d
+  # Anvil dev key #0, prefunded: it deploys the stack and, in the test, pays
+  # gas and the Notary Fee. Public test material.
+  DEPLOY_KEY: ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -85,14 +92,15 @@ jobs:
         run: cargo test --all
 
   # ---------------------------------------------------------------------------
-  # E2E: the rotation path for real — a running notary, the real contracts on
-  # a throwaway chain, and Google's LIVE key set.
+  # E2E: the rotation path for real — the released notary image, the contract
+  # stack as the deploy tool lays it down, and Google's LIVE key set.
   #
   # `cargo test --all` in the `rust` job covers everything but MPC-TLS, with
   # the mock prover standing in. This job covers the rest, so the two together
-  # leave no part of the path unproven. It reaches www.googleapis.com on
-  # purpose: GoogleJwtRoots pins that authority, so a local TLS fixture cannot
-  # stand in for it.
+  # leave no part of the path unproven. Nothing here is a stand-in: the notary
+  # is the image a deployment runs, the contracts are what `libid-deploy
+  # apply` produces, and the endpoint is www.googleapis.com, which
+  # GoogleJwtRoots pins and no local TLS fixture can impersonate.
   # ---------------------------------------------------------------------------
   e2e:
     name: E2E (live Google)
@@ -105,60 +113,92 @@ jobs:
         with:
           toolchain: ${{ env.RUST_VERSION }}
 
-      # anvil: the test spawns its own chain and deploys the real
-      # NotaryService and GoogleJwtRoots from libid-contracts' artifacts.
+      # anvil: the throwaway chain the stack is deployed onto.
       - uses: foundry-rs/foundry-toolchain@908c540300062bd5a7e473851cdb4282204cee09 # v1.9.1
         with:
           version: stable
 
-      - name: Check out the notary
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: ${{ env.NOTARY_REPO }}
-          ref: ${{ env.NOTARY_REV }}
-          path: .notary
-
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          workspaces: |
-            . -> target
-            .notary -> target
 
-      - name: Build the notary
-        working-directory: .notary
-        # RUSTFLAGS is cleared deliberately: the repo-wide `-D warnings` is a
-        # gate on THIS crate, and applying it to another repo's tree would
-        # fail this job on a warning nobody here can fix.
-        env:
-          RUSTFLAGS: ""
-        run: cargo build --release --locked --bin notary
-
-      - name: Start the notary
-        working-directory: .notary
+      - name: Start the chain
         run: |
           set -euo pipefail
-          ./target/release/notary \
-            --host 127.0.0.1 --port 7047 --ws-port 0 \
-            --signing-key "$NOTARY_KEY" > notary.log 2>&1 &
+          anvil --host 127.0.0.1 --port 8545 > anvil.log 2>&1 &
           for _ in $(seq 1 30); do
-            if grep -q "listening on 127.0.0.1:7047" notary.log; then
-              grep -m1 "signer ready" notary.log
+            if (exec 3<>/dev/tcp/127.0.0.1/8545) 2>/dev/null; then
+              echo "anvil is listening"
               exit 0
             fi
             sleep 1
           done
-          echo "the notary did not come up:"
-          cat notary.log
+          echo "::error::anvil did not come up"
+          cat anvil.log
+          exit 1
+
+      - name: Deploy the stack with libid-deploy
+        run: |
+          set -euo pipefail
+          curl -fsSL "$LIBID_DEPLOY_URL" | tar xz --strip-components=1
+          curl -fsSL "$LIBID_DEPLOY_NETWORK_URL" -o local-dev.toml
+          # --dev takes factory ownership by impersonation, which the tool
+          # honours only against anvil/hardhat; --confirm-fresh-deploy is
+          # required while the factory has no code, which on a chain started
+          # seconds ago is always.
+          ./libid-deploy apply \
+            --network local-dev.toml \
+            --signer "$DEPLOY_KEY" \
+            --yes --confirm-fresh-deploy --dev
+
+      - name: Name the deployed contract to the test
+        run: |
+          set -euo pipefail
+          python3 - local-dev.toml >> "$GITHUB_ENV" <<'PY'
+          import sys, tomllib
+
+          identity = tomllib.load(open(sys.argv[1], "rb")).get("identity", {})
+          # The keeper's name for the contract, and the name the same entry
+          # carried before it became GoogleJwtRoots.
+          for key in ("google_jwt_roots", "identity_jwks_roots"):
+              if identity.get(key):
+                  print(f"KEEPER_E2E_GOOGLE_JWT_ROOTS={identity[key]}")
+                  break
+          else:
+              sys.exit(f"no roots address under [identity]: {sorted(identity)}")
+          PY
+
+      - name: Start the notary
+        run: |
+          set -euo pipefail
+          docker run -d --name notary -p 127.0.0.1:7047:7047 \
+            -e NOTARY_HOST=0.0.0.0 \
+            -e NOTARY_PORT=7047 \
+            -e NOTARY_WS_PORT=0 \
+            -e SIGNING_KEY="$NOTARY_KEY" \
+            "$NOTARY_IMAGE"
+          # The wire port accepts only once the signer is ready, so a connect
+          # is the readiness signal.
+          for _ in $(seq 1 60); do
+            if (exec 3<>/dev/tcp/127.0.0.1/7047) 2>/dev/null; then
+              echo "the notary is listening"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::the notary did not come up"
+          docker logs notary
           exit 1
 
       - name: Rotate through the notary against live Google
         env:
           KEEPER_E2E_NOTARY: 127.0.0.1:7047
+          KEEPER_E2E_RPC: http://127.0.0.1:8545
         run: cargo test --test e2e_real -- --ignored --nocapture
 
-      - name: Notary log
-        if: always()
-        run: cat .notary/notary.log || true
+      - name: Logs
+        if: failure()
+        run: |
+          docker logs notary || true
+          cat anvil.log || true
 
   # ---------------------------------------------------------------------------
   # DCO: every commit carries a Signed-off-by trailer, as CONTRIBUTING.md
