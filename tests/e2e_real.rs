@@ -1,74 +1,52 @@
-//! The whole loop for real: a running notary, the real contracts on Anvil,
-//! Google's live JWKS, and one genuine MPC-TLS rotation.
+//! The whole loop for real: a running notary, the contract stack
+//! `libid-deploy` lays down on anvil, Google's live JWKS, and one genuine
+//! MPC-TLS rotation.
 //!
 //! The only test that drives a rotation: the keeper's prover runs a real
 //! session against `www.googleapis.com` through a notary it does not share a
 //! crate with, reads the signed record back off the wire, and
 //! `GoogleJwtRoots` accepts it. It is `#[ignore]`d because it needs two
-//! things a plain `cargo test` does not have -- a notary to talk to and
-//! network to Google -- so CI runs it in a job of its own.
+//! things a plain `cargo test` does not have -- the stack in `compose.yaml`
+//! and network to Google -- so CI runs it in a job of its own.
 //!
 //! # Running it
 //!
-//! Start a notary signing with Anvil's dev key #1 (the key the deployed
-//! `NotaryService` is initialized to trust), either from a checkout of
-//! libid-org/notary:
-//!
 //! ```sh
-//! notary --port 7047 --ws-port 0 \
-//!   --signing-key 59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d
-//! ```
-//!
-//! or from an image. It must be a `custom-<sha>` build: every released
-//! `<version>` tag up to 0.3.0-rc.3 still answers a www.googleapis.com
-//! session with the old JWKS response instead of a ceremony attestation, and
-//! pins the pre-domain-separation mpz. Restore the `<version>` form once a
-//! notary release carries the JWKS-free server.
-//!
-//! ```sh
-//! docker run --rm -p 7047:7047 ghcr.io/libid-org/notary:custom-c957999 \
-//!   --host 0.0.0.0 --port 7047 --ws-port 0 \
-//!   --signing-key 59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d
-//! ```
-//!
-//! then point the test at it:
-//!
-//! ```sh
-//! KEEPER_E2E_NOTARY=127.0.0.1:7047 cargo test --test e2e_real -- --ignored
+//! echo "127.0.0.1 anvil" | sudo tee -a /etc/hosts   # once per machine
+//! docker compose up -d --wait --build
+//! cargo test --test e2e_real -- --ignored --nocapture
+//! docker compose down                                # a fresh chain per run
 //! ```
 //!
 //! # The stack under test
 //!
-//! With nothing else set, the test deploys `NotaryService` and
-//! `GoogleJwtRoots` itself, on an anvil it spawns -- one command, no
-//! prerequisites. To drive a stack deployed OUTSIDE it, as CI does with
-//! `libid-deploy apply` against a plain anvil, name that stack instead:
+//! `e2e/local-dev.toml` is chain-configurations' published network file,
+//! byte for byte (the compose build proves it). The keeper reads it the way a
+//! deployment's `keeper.toml` does, through `network_file`: the chain, and
+//! the `GoogleJwtRoots` address, are whatever the keeper's own parser
+//! resolves from it, and everything this test drives comes from that
+//! resolution. Nothing here extracts an address by other means. The file
+//! names the chain by its compose service name, hence the hosts line above.
 //!
-//! * `KEEPER_E2E_GOOGLE_JWT_ROOTS=0x…` -- the deployed roots proxy. Setting
-//!   it is what selects the external stack; nothing is deployed then.
-//! * `KEEPER_E2E_RPC=http://…` -- its chain. Defaults to
-//!   `http://127.0.0.1:8545`, where a plain `anvil` listens.
-//! * `KEEPER_E2E_NOTARY_SERVICE=0x…` -- the service the fee is paid to. Read
-//!   off `GoogleJwtRoots.notaryService()` when unset.
-//!
-//! An external stack must be fresh -- the test asserts a FIRST rotation --
-//! its Notary Service must trust the key the notary signs with, and Anvil's
-//! dev key #0 must be funded on its chain, since that key pays gas and the
-//! fee.
-//!
-//! `KEEPER_E2E_NOTARY_ADDRESS=0x…` overrides the trusted notary address when
-//! the notary signs with some other key. `KEEPER_E2E_CAPTURE=<path>` also
-//! writes the record the keeper obtained -- attested data, signature, the
-//! address the signature recovers to and the notary's `createdAt` -- as JSON,
-//! which is how a contract test gets a fixture Google actually served.
+//! * `KEEPER_E2E_NETWORK_FILE=<path>` -- drive another network file. Its
+//!   stack must be fresh (the test asserts a FIRST rotation), its Notary
+//!   Service must trust the key the notary signs with, and Anvil's dev key
+//!   #0 must be funded on its chain, since that key pays gas and the fee.
+//! * `KEEPER_E2E_NOTARY=host:port` -- another notary. Defaults to
+//!   `127.0.0.1:7047`, where compose publishes the stack's.
+//! * `KEEPER_E2E_NOTARY_ADDRESS=0x…` -- the trusted notary address, when the
+//!   notary signs with a key other than Anvil's dev key #1.
+//! * `KEEPER_E2E_CAPTURE=<path>` -- also write the record the keeper
+//!   obtained -- attested data, signature, the address the signature
+//!   recovers to and the notary's `createdAt` -- as JSON, which is how a
+//!   contract test gets a fixture Google actually served.
 
-use std::path::Path;
+use std::path::{
+    Path,
+    PathBuf,
+};
 
 use alloy::{
-    node_bindings::{
-        Anvil,
-        AnvilInstance,
-    },
     primitives::{
         Address,
         U256,
@@ -84,13 +62,9 @@ use keeper::{
     proof::ProofSource,
     run,
 };
-use libid_contracts::{
-    artifacts::Artifacts,
-    bindings::ceremony::{
-        GoogleJwtRoots,
-        NotaryService,
-    },
-    deploy::deploy_behind_proxy,
+use libid_contracts::bindings::ceremony::{
+    GoogleJwtRoots,
+    NotaryService,
 };
 use libid_crypto::{
     hex_to_signing_key,
@@ -98,6 +72,7 @@ use libid_crypto::{
     recover_eth_claim,
 };
 use libid_signer::SignerSource;
+use serde::Deserialize;
 
 /// Anvil's dev key #0 -- pays gas and the Notary Fee.
 const GAS_KEY: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
@@ -105,28 +80,30 @@ const GAS_KEY: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf
 /// with, so the deployed `NotaryService` trusts it.
 const NOTARY_KEY: &str =
     "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
-/// The Notary Fee the service is deployed with. Non-zero so a rotation that
-/// forgot to attach it reverts, and so the fee's arrival can be asserted.
-/// An external stack sets its own; the fee is read off the chain either way.
-const NOTARY_FEE_WEI: u64 = 1_000;
-/// Where a plain `anvil` listens: the default chain for an external stack.
-const DEFAULT_RPC: &str = "http://127.0.0.1:8545";
+/// Where compose publishes the stack's notary.
+const DEFAULT_NOTARY: &str = "127.0.0.1:7047";
 /// Google's live key set -- the same endpoint the notarized session reads.
 const GOOGLE_JWKS_URL: &str = "https://www.googleapis.com/oauth2/v3/certs";
 
-fn write_keeper_toml(dir: &Path, contents: &str) -> std::path::PathBuf {
+fn write_keeper_toml(dir: &Path, contents: &str) -> PathBuf {
     let path = dir.join("keeper.toml");
     std::fs::write(&path, contents).unwrap();
     path
 }
 
-/// The notary this run talks to, from `KEEPER_E2E_NOTARY`. A missing variable
-/// is a usage error, not a skip: the test only runs when asked for.
+/// The network file this run drives: `KEEPER_E2E_NETWORK_FILE`, or the
+/// published local-dev file the compose stack is deployed from.
+fn network_file_under_test() -> PathBuf {
+    std::env::var_os("KEEPER_E2E_NETWORK_FILE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("e2e/local-dev.toml")
+        })
+}
+
+/// The notary this run talks to, from `KEEPER_E2E_NOTARY`, else the stack's.
 fn notary_under_test() -> String {
-    std::env::var("KEEPER_E2E_NOTARY").expect(
-        "set KEEPER_E2E_NOTARY=host:port to a running notary that signs with \
-         Anvil's dev key #1 (see the module docs), then run with --ignored",
-    )
+    std::env::var("KEEPER_E2E_NOTARY").unwrap_or_else(|_| DEFAULT_NOTARY.to_string())
 }
 
 /// The address the deployed `NotaryService` trusts: Anvil #1 by default, or
@@ -147,62 +124,17 @@ fn env_address(var: &str) -> Option<Address> {
         .map(|hex| hex.parse().unwrap_or_else(|e| panic!("{var}: {e}")))
 }
 
-/// The chain the contracts live on. An external stack names its own RPC (or
-/// takes the default anvil endpoint); otherwise this test spawns the chain
-/// and holds it open for the run.
-fn chain_under_test(external: bool) -> (Option<AnvilInstance>, String) {
-    if external {
-        let rpc =
-            std::env::var("KEEPER_E2E_RPC").unwrap_or_else(|_| DEFAULT_RPC.to_string());
-        return (None, rpc);
-    }
-    assert!(
-        std::env::var_os("KEEPER_E2E_RPC").is_none(),
-        "KEEPER_E2E_RPC names a chain but KEEPER_E2E_GOOGLE_JWT_ROOTS names \
-         no contract on it: set both to drive a deployed stack, or neither to \
-         deploy on a spawned anvil"
-    );
-    let anvil = Anvil::new().spawn();
-    let rpc = anvil.endpoint();
-    (Some(anvil), rpc)
+/// What the network file declares and the keeper does not read: the Notary
+/// Service the roots contract must verify through, and the fee land in.
+/// Read here only to hold the deployed stack to its own declaration.
+#[derive(Deserialize)]
+struct DeclaredStack {
+    contracts: DeclaredContracts,
 }
 
-/// Deploy the pair this test drives from libid-contracts' embedded artifacts:
-/// a `NotaryService` that trusts `notary` and charges [`NOTARY_FEE_WEI`], and
-/// the `GoogleJwtRoots` that verifies through it. Returns them in the order
-/// (roots, service).
-async fn deploy_stack<P: Provider>(
-    provider: &P,
-    owner: Address,
-    notary: Address,
-) -> (Address, Address) {
-    let artifacts = Artifacts::embedded();
-    let notary_service = deploy_behind_proxy(
-        provider,
-        &artifacts,
-        "NotaryService",
-        &NotaryService::initializeCall {
-            owner_: owner,
-            notary_: notary,
-            fee_: U256::from(NOTARY_FEE_WEI),
-        },
-        None,
-    )
-    .await
-    .unwrap();
-    let jwt_roots = deploy_behind_proxy(
-        provider,
-        &artifacts,
-        "GoogleJwtRoots",
-        &GoogleJwtRoots::initializeCall {
-            owner_: owner,
-            notary_: notary_service,
-        },
-        None,
-    )
-    .await
-    .unwrap();
-    (jwt_roots, notary_service)
+#[derive(Deserialize)]
+struct DeclaredContracts {
+    notary_service: Address,
 }
 
 /// The notary's `createdAt`: bytes 32..40 of the section 9.1 record,
@@ -212,43 +144,18 @@ fn created_at(attested_data: &[u8]) -> u64 {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a running notary (KEEPER_E2E_NOTARY) and network to Google"]
+#[ignore = "needs the compose stack (docker compose up -d --wait) and network to Google"]
 async fn keeper_rotates_the_roots_through_a_real_notary() {
     let notary_addr = notary_under_test();
     let trusted = trusted_notary_address();
+    let network_file = network_file_under_test();
 
-    // The stack: the one `KEEPER_E2E_GOOGLE_JWT_ROOTS` names, or one deployed
-    // here on a chain spawned for this run. `_anvil` holds that chain open.
-    let deployed = env_address("KEEPER_E2E_GOOGLE_JWT_ROOTS");
-    let (_anvil, rpc_url) = chain_under_test(deployed.is_some());
-    let (wallet, deployer) = SignerSource::from_spec(GAS_KEY)
-        .unwrap()
-        .build_wallet(None)
-        .await
-        .unwrap();
-    let provider = ProviderBuilder::new()
-        .wallet(wallet)
-        .connect(&rpc_url)
-        .await
-        .unwrap();
-
-    let (jwt_roots, notary_service) = match deployed {
-        Some(jwt_roots) => {
-            let service = match env_address("KEEPER_E2E_NOTARY_SERVICE") {
-                Some(address) => address,
-                None => GoogleJwtRoots::new(jwt_roots, &provider)
-                    .notaryService()
-                    .call()
-                    .await
-                    .unwrap(),
-            };
-            (jwt_roots, service)
-        }
-        None => deploy_stack(&provider, deployer, trusted).await,
-    };
-
-    // The keeper's cheap poll reads Google's live endpoint, and its proof
-    // source is the notary over the wire.
+    // The keeper's view of the stack: the network file, by reference, the
+    // way a deployment's keeper.toml names it. The keeper's cheap poll reads
+    // Google's live endpoint, and its proof source is the notary over the
+    // wire. The resolved network -- its chain and its roots contract -- is
+    // what the rest of this test drives, so the parser is under test, not
+    // bypassed.
     let dir = tempfile::tempdir().unwrap();
     let path = write_keeper_toml(
         dir.path(),
@@ -256,12 +163,29 @@ async fn keeper_rotates_the_roots_through_a_real_notary() {
             "signer = \"{GAS_KEY}\"\n\
              notary_url = \"tcp://{notary_addr}\"\n\
              [[networks]]\n\
-             name = \"anvil\"\n\
-             rpc_url = \"{rpc_url}\"\n\
-             google_jwt_roots = \"{jwt_roots}\"\n"
+             network_file = \"{}\"\n",
+            network_file.display()
         ),
     );
     let (config, networks) = KeeperConfig::load(&path).unwrap();
+    let [network] = networks.as_slice() else {
+        panic!("one network file resolves to one network, got {networks:?}");
+    };
+    let jwt_roots = network.google_jwt_roots;
+    let declared: DeclaredStack =
+        toml::from_str(&std::fs::read_to_string(&network_file).unwrap()).unwrap();
+    let notary_service = declared.contracts.notary_service;
+
+    let (wallet, _) = SignerSource::from_spec(GAS_KEY)
+        .unwrap()
+        .build_wallet(None)
+        .await
+        .unwrap();
+    let provider = ProviderBuilder::new()
+        .wallet(wallet)
+        .connect(&network.rpc_url)
+        .await
+        .unwrap();
 
     // The keys the chain must end up trusting: Google's live set, read the
     // same way the keeper's poll reads it. (Google rotating between this
@@ -309,14 +233,15 @@ async fn keeper_rotates_the_roots_through_a_real_notary() {
     }
 
     let roots = GoogleJwtRoots::new(jwt_roots, &provider);
-    // Both hold by construction when this test deployed the stack, and are
-    // the two ways an EXTERNAL one can be wrong: the fee would land in a
-    // service this contract does not verify through, or the notary's
-    // signature would recover to a key the service does not trust.
+    // The two ways a deployed stack can be wrong for this keeper: the fee
+    // would land in a service the roots contract does not verify through,
+    // or the notary's signature would recover to a key the service does not
+    // trust.
     assert_eq!(
         roots.notaryService().call().await.unwrap(),
         notary_service,
-        "the roots contract verifies through another Notary Service"
+        "the roots contract verifies through a Notary Service other than the \
+         one the network file declares"
     );
     assert!(
         NotaryService::new(notary_service, &provider)

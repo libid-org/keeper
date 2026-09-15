@@ -84,7 +84,6 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
-alloy = { version = "1", features = ["node-bindings"] }
 tempfile = "3"
 
 [patch."https://github.com/tlsnotary/tlsn"]
