@@ -34,8 +34,8 @@ notary = { git = "https://github.com/libid-org/notary", tag = "v0.2.0" }
 # copies arriving through `notary` — mixing the crates.io releases with the
 # git copies would put two incompatible versions of the same types in the
 # graph (libid-tlsn is git-only and exposes sibling-crate types).
-libid-crypto = { git = "https://github.com/libid-org/libid-rs", tag = "v0.2.0" }
-libid-signer = { git = "https://github.com/libid-org/libid-rs", tag = "v0.2.0" }
+libid-crypto = { git = "https://github.com/libid-org/libID-rs", tag = "v0.2.0" }
+libid-signer = { git = "https://github.com/libid-org/libID-rs", tag = "v0.2.0" }
 
 # ── contract bindings + deploy helpers ──────────────────────────────────────
 # The registry crate is fine here: it has no tlsn-adjacent types.
