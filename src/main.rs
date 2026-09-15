@@ -64,9 +64,34 @@ fn main() -> ExitCode {
         Ok(loaded) => loaded,
         Err(e) => {
             eprintln!("config error: {e:#}");
+            // The path is the one thing an operator can fix without reading
+            // the source: say where it came from.
+            let not_found = e
+                .root_cause()
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound);
+            if not_found {
+                eprintln!(
+                    "the config path comes from --config or KEEPER_CONFIG; point it at \
+                     a keeper.toml (in the container, mount one at {})",
+                    cli.config.display()
+                );
+            }
             return ExitCode::FAILURE;
         }
     };
+    // A keeper that will submit fails now on what would otherwise fail at
+    // the first rotation, weeks in.
+    let submits = matches!(
+        cli.command,
+        Command::Run { dry_run: false } | Command::Once { dry_run: false }
+    );
+    if submits {
+        if let Err(e) = run::check_can_submit(&config, &networks) {
+            eprintln!("config error: {e:#}");
+            return ExitCode::FAILURE;
+        }
+    }
 
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()

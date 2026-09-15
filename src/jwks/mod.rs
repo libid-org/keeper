@@ -1,0 +1,197 @@
+//! The JWKS reading: Google's OIDC signing keys, notarized like any other
+//! session.
+//!
+//! The keeper points the same MPC-TLS machinery at
+//! `https://www.googleapis.com/oauth2/v3/certs` and gets back the record every
+//! session gets -- a [`NotarizedSession`] -- which it submits to
+//! `GoogleJwtRoots.rotate`. That contract authenticates the signature
+//! through the Notary Service and reads the key set straight out of the
+//! revealed transcript. The notary special-cases nothing here: it signs what it
+//! observed, and which host it observed is in the record (`authorityId`), for
+//! the contract to compare against the authority it pins.
+//!
+//! What makes the reading readable on chain is its [`layout`]: everything
+//! revealed, nothing committed. The contract concatenates the revealed ranges
+//! and parses request line, `Host` header, status line, framing and JSON out
+//! of the result; a commitment anywhere in either direction is refused,
+//! because a hidden range is where a second `Host` header or a decoy `"keys"`
+//! member would live.
+//!
+//! The entry point is [`prover::notarize_jwks`]: it runs the MPC-TLS prover
+//! against a live notary over any async socket and reads the record back.
+
+/// The record as the notary hands it back: the section 9.1 attested data and
+/// the notary's signature over it, and nothing else. An alias of
+/// libid-transcript's wire struct, so the keeper and the notary agree on the
+/// frame by construction.
+pub type NotarizedSession = libid_transcript::AttestationWire;
+
+/// Errors from building or obtaining a JWKS reading.
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    /// The reading could not be built: request construction.
+    #[error("jwks: {detail}")]
+    Jwks {
+        /// Human-readable failure detail.
+        detail: String,
+    },
+    /// MPC-TLS session driving failed.
+    #[error(transparent)]
+    Tlsn(#[from] libid_tlsn::Error),
+    /// Wire protocol / transcript range failure.
+    #[error(transparent)]
+    Transcript(#[from] libid_transcript::Error),
+    /// Crypto primitive failure.
+    #[error(transparent)]
+    Crypto(#[from] libid_crypto::Error),
+}
+
+/// Result alias for this module.
+pub type Result<T> = std::result::Result<T, Error>;
+
+pub mod prover;
+
+use libid_tlsn::{
+    Bytes,
+    HttpBody,
+    HttpRequest,
+};
+use libid_transcript::ceremony::Layout;
+
+/// The TLS server name the JWKS reading authenticates. The record carries
+/// `keccak256` of it as `authorityId`, and `GoogleJwtRoots` refuses any
+/// other -- and, because googleapis.com serves many virtual hosts under one
+/// certificate, also requires the `Host` header the request carries to name
+/// this same host.
+pub const JWKS_DOMAIN: &str = "www.googleapis.com";
+
+/// The endpoint the JWKS reading requests. The contract pins the request line
+/// `GET /oauth2/v3/certs HTTP/1.1` byte for byte.
+pub const JWKS_ENDPOINT: &str = "/oauth2/v3/certs";
+
+/// What the JWKS reading discloses: everything, in both directions.
+///
+/// One revealed range per direction covering the whole transcript, and no
+/// commitment. A public key set has nothing to hide, and zero commitments is
+/// what lets the contract read the transcript by concatenation safely: with
+/// exact coverage and nothing committed, no cut can hide bytes between the
+/// request line and the last key.
+///
+/// The JWKS session is not part of a ceremony, so it states its own layout
+/// rather than calling `libid_transcript::ceremony`. The shape is the same --
+/// the reveals are named and the commitments are their complement, here empty
+/// -- so each direction tiles by construction, which is what the contract's
+/// `requireExactCoverage` demands.
+pub fn layout(sent: &[u8], recv: &[u8]) -> (Layout, Layout) {
+    let whole = |bytes: &[u8]| Layout {
+        reveal: std::iter::once(0..bytes.len()).collect(),
+        commit: Vec::new(),
+    };
+    (whole(sent), whole(recv))
+}
+
+/// The request the reading sends.
+///
+/// The URI is absolute because `prover_generic` derives the server to reach
+/// from it; on the wire the request-target is origin-form (`prover_generic`
+/// rewrites it before sending), so the transcript's first line is the one the
+/// contract pins. hyper writes header names in lowercase, in the order they
+/// were set, and adds none of its own to a bodiless `GET`, so the sent
+/// transcript is exactly:
+///
+/// ```text
+/// GET /oauth2/v3/certs HTTP/1.1\r\n
+/// host: www.googleapis.com\r\n
+/// connection: close\r\n
+/// accept: application/json\r\n
+/// user-agent: <user_agent>\r\n
+/// \r\n
+/// ```
+///
+/// `connection: close` makes the server delimit the response, so the prover
+/// reads to EOF and the transcript ends where the body does.
+pub(crate) fn request(user_agent: &str) -> Result<HttpRequest<HttpBody<Bytes>>> {
+    HttpRequest::builder()
+        .method("GET")
+        .uri(format!("https://{JWKS_DOMAIN}{JWKS_ENDPOINT}"))
+        .header("Host", JWKS_DOMAIN)
+        .header("Connection", "close")
+        .header("Accept", "application/json")
+        .header("User-Agent", user_agent)
+        .body(HttpBody::new(Bytes::new()))
+        .map_err(|e| Error::Jwks {
+            detail: format!("request build: {e}"),
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The contract's coverage rule: reveals and commitments account for every
+    /// byte of the direction exactly, no gap and no overlap.
+    fn assert_tiles(layout: &Layout, length: usize) {
+        let mut spans: Vec<_> = layout
+            .reveal
+            .iter()
+            .chain(layout.commit.iter())
+            .cloned()
+            .collect();
+        spans.sort_by_key(|range| range.start);
+        let mut at = 0;
+        for range in spans {
+            assert_eq!(range.start, at, "gap or overlap before {}", range.start);
+            at = range.end;
+        }
+        assert_eq!(at, length, "the spans do not reach the transcript end");
+    }
+
+    #[test]
+    fn reveals_both_directions_whole_and_commits_nothing() {
+        let sent = b"GET /oauth2/v3/certs HTTP/1.1\r\nhost: www.googleapis.com\r\n\r\n";
+        let recv = b"HTTP/1.1 200 OK\r\n\r\n{\"keys\":[]}";
+        let (s, r) = layout(sent, recv);
+
+        assert_eq!(s.reveal.len(), 1, "one range, not several to cut between");
+        assert_eq!(s.reveal[0], 0..sent.len());
+        assert_eq!(r.reveal.len(), 1, "one range, not several to cut between");
+        assert_eq!(r.reveal[0], 0..recv.len());
+        assert!(s.commit.is_empty(), "a commitment would hide request bytes");
+        assert!(
+            r.commit.is_empty(),
+            "a commitment would hide response bytes"
+        );
+        assert_tiles(&s, sent.len());
+        assert_tiles(&r, recv.len());
+    }
+
+    #[test]
+    fn the_request_names_the_host_the_path_and_the_four_headers() {
+        let request = request("libid-keeper/test").unwrap();
+        assert_eq!(request.method(), "GET");
+        assert_eq!(request.uri().host(), Some(JWKS_DOMAIN));
+        assert_eq!(request.uri().path(), JWKS_ENDPOINT);
+        let headers: Vec<(&str, &[u8])> = request
+            .headers()
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_bytes()))
+            .collect();
+        let expected: Vec<(&str, &[u8])> = vec![
+            ("host", JWKS_DOMAIN.as_bytes()),
+            ("connection", b"close"),
+            ("accept", b"application/json"),
+            ("user-agent", b"libid-keeper/test"),
+        ];
+        assert_eq!(headers, expected);
+    }
+
+    /// The poll (`run::fetch_google_keys`) and the notarized session must
+    /// read ONE endpoint, or the verdicts describe one key set and the record
+    /// attests another. The poll fetches `decision::GOOGLE_JWKS_URL`; this is
+    /// what the session requests.
+    #[test]
+    fn the_request_targets_the_url_the_poll_reads() {
+        let request = request("libid-keeper/test").unwrap();
+        assert_eq!(request.uri().to_string(), crate::decision::GOOGLE_JWKS_URL);
+    }
+}

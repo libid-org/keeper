@@ -1,0 +1,94 @@
+# The e2e stack: everything tests/e2e_real.rs talks to, except Google.
+#
+#   docker compose up -d --wait --build
+#   cargo test --test e2e_real -- --ignored --nocapture
+#   docker compose down
+#
+# `up --wait` returns once anvil and the notary are healthy and `deploy` has
+# converged the chain onto e2e/local-dev.toml, and fails if deploy failed.
+# `--build` re-checks e2e/ against the pinned release every run; the image
+# build is cached, so it costs seconds. CI runs these same commands
+# (.github/workflows/ci.yml, job `e2e`).
+#
+# The test runs on the host and reads e2e/local-dev.toml — chain-
+# configurations' published file, unmodified — through the keeper's own
+# `network_file`. That file names the chain by this stack's service name,
+# `anvil`, so the host maps it: one line in /etc/hosts, `127.0.0.1 anvil`,
+# and the port published below.
+#
+# Not a deployment: there is no keeper service here. The product image is
+# the Dockerfile at the root.
+
+services:
+  # The throwaway chain. Chain id 31337 and the funded dev accounts are
+  # anvil's defaults, which local-dev.toml declares.
+  anvil:
+    image: ghcr.io/foundry-rs/foundry:v1.7.1
+    # The image's entrypoint is `sh -c`, which takes ONE string and would
+    # swallow a split command's flags; name the binary here instead.
+    # 0.0.0.0: the default 127.0.0.1 is unreachable from `deploy`.
+    entrypoint: ["anvil", "--host", "0.0.0.0"]
+    ports:
+      - "127.0.0.1:8545:8545"
+    healthcheck:
+      test: ["CMD", "cast", "chain-id", "--rpc-url", "http://127.0.0.1:8545"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+
+  # The PUBLISHED notary image, pulled not built, so the rotation is proven
+  # against the binary a deployment runs. `custom-<sha>` is a commit build
+  # of the JWKS-free notary stack, until a notary release carries it. The
+  # pin lives here and nowhere else.
+  notary:
+    image: ghcr.io/libid-org/notary:custom-c957999
+    environment:
+      NOTARY_HOST: 0.0.0.0
+      NOTARY_PORT: 7047
+      NOTARY_WS_PORT: 0
+      # Anvil dev key #1: its address is local-dev.toml's [accounts].notary,
+      # so the deployed NotaryService trusts this signer. Public test
+      # material.
+      SIGNING_KEY: 59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d
+    ports:
+      - "127.0.0.1:7047:7047"
+    healthcheck:
+      # The image's own check (a TCP connect to the wire port, which accepts
+      # only once the signer is ready), every second instead of every 30 so
+      # `--wait` returns as soon as it is up.
+      interval: 1s
+      timeout: 5s
+      retries: 60
+      start_period: 0s
+
+  # One shot: libid-deploy from the pinned chain-configurations release (see
+  # e2e/Dockerfile) converges anvil onto local-dev.toml, then exits. No
+  # --rpc-url: inside this network the file's own rpc_url resolves.
+  deploy:
+    build: e2e
+    depends_on:
+      anvil:
+        condition: service_healthy
+    # --dev takes factory ownership by impersonation, which the tool honours
+    # only against anvil/hardhat; --confirm-fresh-deploy is required while
+    # the factory has no code, which on a chain started seconds ago is
+    # always. The signer is the file's own default, anvil dev key #0.
+    command:
+      - apply
+      - --network
+      - /e2e/local-dev.toml
+      - --yes
+      - --confirm-fresh-deploy
+      - --dev
+
+  # `up --wait` counts a one-shot service as finished only when another
+  # service depends on its completion (compose's getDependencyCondition);
+  # otherwise its exit fails the wait. Nothing in this stack needs the
+  # deployed chain but the test on the host, so this stands in for it: up
+  # once `deploy` has succeeded, and nothing else.
+  ready:
+    image: alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
+    command: sleep infinity
+    depends_on:
+      deploy:
+        condition: service_completed_successfully

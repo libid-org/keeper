@@ -1,8 +1,9 @@
 name: CI
 
-# Two jobs: rust (fmt/clippy/test) and dco — the same shape as the other
-# libid-org repos (notary, libid-rs), so a contributor moving between them
-# meets the same gates.
+# Three jobs: rust (fmt/clippy/test), e2e (the real rotation path — notary
+# image, deployed stack, live Google) and dco. rust and dco are the same shape
+# as the other libid-org repos (notary, libid-rs), so a contributor moving
+# between them meets the same gates; e2e is this repo's own, and the heaviest.
 #
 # Every third-party action is pinned by commit SHA, with the tag in a comment,
 # so a moved tag cannot change what executes.
@@ -24,10 +25,10 @@ env:
   # Incremental state is written, cached and never read in CI — every job
   # starts from a restored cache and never rebuilds the same crate twice.
   CARGO_INCREMENTAL: 0
-  # The crate's rust-version floor (see Cargo.toml): building on exactly the
-  # floor keeps that claim honest, and a pinned toolchain cannot break CI
-  # mid-PR.
-  RUST_VERSION: 1.97.1
+  # The stable toolchain every job builds on, pinned so a new release cannot
+  # turn a PR red on its own. It is ABOVE the crate's rust-version floor (1.95,
+  # inherited — see Cargo.toml), which nothing here exercises.
+  RUST_VERSION: 1.98.1
   # Nightly is for `cargo +"$NIGHTLY" fmt` ONLY: rustfmt options like
   # `imports_granularity` are nightly-only, and stable rustfmt does not reject
   # them — it silently IGNORES them and reports success. Dated pin so a
@@ -57,11 +58,6 @@ jobs:
           toolchain: ${{ env.RUST_VERSION }}
           components: clippy
 
-      # The e2e test spawns `anvil` (alloy node-bindings).
-      - uses: foundry-rs/foundry-toolchain@908c540300062bd5a7e473851cdb4282204cee09 # v1.9.1
-        with:
-          version: stable
-
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: Formatting (nightly rustfmt)
@@ -75,6 +71,49 @@ jobs:
 
       - name: Tests
         run: cargo test --all
+
+  # ---------------------------------------------------------------------------
+  # E2E: the rotation path for real — the released notary image, the contract
+  # stack as the deploy tool lays it down, and Google's LIVE key set.
+  #
+  # The only job that drives a rotation. `cargo test --all` in the `rust`
+  # job covers config, the decision and the request's shape, and nothing
+  # there signs a record. Nothing here is a stand-in: the notary is the image
+  # a deployment runs, the contracts are what `libid-deploy apply` produces,
+  # and the endpoint is www.googleapis.com, which GoogleJwtRoots pins and no
+  # local TLS fixture can impersonate.
+  #
+  # The stack is compose.yaml, pins included, and the steps are the commands
+  # a developer runs (see README.md); this job adds nothing of its own.
+  # ---------------------------------------------------------------------------
+  e2e:
+    name: E2E (live Google)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      # The published network file names the chain by its compose service
+      # name, and the test runs on the host: map the name to the published
+      # port.
+      - name: anvil resolves on the host
+        run: echo "127.0.0.1 anvil" | sudo tee -a /etc/hosts
+
+      - name: Bring up the stack
+        run: docker compose up -d --wait --build
+
+      - name: Rotate through the notary against live Google
+        run: cargo test --test e2e_real -- --ignored --nocapture
+
+      - name: Logs
+        if: failure()
+        run: docker compose logs
 
   # ---------------------------------------------------------------------------
   # DCO: every commit carries a Signed-off-by trailer, as CONTRIBUTING.md

@@ -2,15 +2,16 @@
 name = "keeper"
 version = "0.2.0"
 edition = "2021"
-# Inherited floor: the notary lib dependency pulls the `tlsn` MPC graph
-# (unstable `cfg_select!` before 1.94) and the AWS SDK crates via
-# libid-signer declare 1.94.1.
-rust-version = "1.94.1"
+# Inherited floor: libid-tlsn pulls the `tlsn` MPC graph (TLSNotary
+# alpha.15's `mpz` crates declare 1.95) and the AWS SDK crates via libid-signer
+# declare 1.94.1.
+rust-version = "1.95"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/libid-org/keeper"
-description = "Permissionless keeper that keeps Google JWKS roots fresh on-chain: obtains MPC-TLS notarized readings of Google's JWKS from a libid notary and submits rotate() to the JWKS contracts on every configured network."
-# A binary + companion library, never a registry crate: it names `notary`
-# and the libid-rs crates (git-only sources), which cargo refuses to publish.
+description = "Permissionless keeper that keeps Google's JWT signing keys trusted on chain: obtains MPC-TLS notarized readings of Google's JWKS from a libid notary and submits rotate() to GoogleJwtRoots on every configured network, paying the Notary Fee."
+# A binary + companion library, never a registry crate: it names git-only
+# libid-rs crates (libid-tlsn) and carries `[patch]` tables, which cargo
+# refuses to publish.
 publish = false
 
 [lib]
@@ -22,24 +23,28 @@ name = "keeper"
 path = "src/main.rs"
 
 [dependencies]
-# ── the notary service's companion library ──────────────────────────────────
-# Prover-side JWKS machinery: `jwks::prover::notarize_jwks` (the real MPC-TLS
-# round trip against a running notary), `jwks::mock::MockProver` (the
-# plain-TLS test seam), and the `JwksRotationProof` wire type. The tag pins
-# the exact tlsn/libid-rs graph the notary released with.
-notary = { git = "https://github.com/libid-org/notary", tag = "v0.2.0" }
-
 # ── libid-rs shared crates ──────────────────────────────────────────────────
-# Same git tag as the notary dependency pins, so cargo unifies them with the
-# copies arriving through `notary` — mixing the crates.io releases with the
-# git copies would put two incompatible versions of the same types in the
-# graph (libid-tlsn is git-only and exposes sibling-crate types).
-libid-crypto = { git = "https://github.com/libid-org/libid-rs", tag = "v0.2.0" }
-libid-signer = { git = "https://github.com/libid-org/libid-rs", tag = "v0.2.0" }
+# The same tag the notary pins for its libid-rs crates, so a keeper and a
+# notary built from these manifests share one copy of every type: libid-tlsn
+# is git-only and exposes sibling-crate types, and `NotarizedSession` is
+# libid-transcript's `AttestationWire`, the frame both sides read and write.
+# Moves with the notary's pin, never on its own.
+libid-crypto = { git = "https://github.com/libid-org/libid-rs", tag = "v0.4.0" }
+libid-signer = { git = "https://github.com/libid-org/libid-rs", tag = "v0.4.0" }
+# The JWKS prover runs the MPC-TLS session itself (libid-tlsn), and states
+# its layout and reads the frame back (libid-transcript). Both at the same
+# tag, or cargo carries two copies of the types.
+libid-tlsn = { git = "https://github.com/libid-org/libid-rs", tag = "v0.4.0" }
+libid-transcript = { git = "https://github.com/libid-org/libid-rs", tag = "v0.4.0" }
 
 # ── contract bindings + deploy helpers ──────────────────────────────────────
-# The registry crate is fine here: it has no tlsn-adjacent types.
-libid-contracts = "0.3.0"
+# The registry crate is fine here: it has no tlsn-adjacent types. Its
+# `GoogleJwtRoots` verifies through the Notary Service (`rotate(bytes,bytes)
+# payable`, `quoteRotation()`), and it embeds the forge artifacts the e2e
+# deploys, which are not in git — so it cannot be taken from the repo.
+libid-contracts = "0.10.0"
+# Follows libid-contracts' alloy line. The bindings take and return alloy
+# types, so a 2.x here would be a second, incompatible `Provider`.
 alloy = { version = "1", features = [
     "contract",
     "providers",
@@ -50,16 +55,17 @@ alloy = { version = "1", features = [
 
 # ── everything else ─────────────────────────────────────────────────────────
 anyhow = "1"
-base64 = "0.22"
+base64 = "0.23"
 clap = { version = "4", features = ["derive", "env"] }
 hex = "0.4"
-# The mock prover signs with a caller-provided k256 key.
-k256 = { version = "0.13", features = ["ecdsa", "sha256"] }
-num-bigint = "0.4"
+num-bigint = "0.5"
 # Plain-HTTPS fetch of Google's live JWKS (the cheap poll; notarization
-# happens only when a rotation is actually needed).
-reqwest = { version = "0.12", default-features = false, features = [
-    "rustls-tls",
+# happens only when a rotation is actually needed). The same 0.13 alloy's
+# HTTP transport pulls, with the TLS backend it already turns on (`rustls`
+# is 0.12's `rustls-tls`: aws-lc-rs plus the platform verifier), so the build
+# carries ONE reqwest and one TLS stack.
+reqwest = { version = "0.13", default-features = false, features = [
+    "rustls",
     "json",
 ] }
 serde = { version = "1", features = ["derive"] }
@@ -69,13 +75,52 @@ tokio = { version = "1", features = [
     "rt-multi-thread",
     "macros",
     "net",
+    "io-util",
     "time",
     "signal",
 ] }
-toml = "0.8"
+toml = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
-alloy = { version = "1", features = ["node-bindings"] }
 tempfile = "3"
+
+[patch."https://github.com/tlsnotary/tlsn"]
+# The same TLSNotary fork pin the notary carries (#1178 reclaims the session
+# channel, #1179 preserves hash-opening order, #1173 splits the RCOT
+# instances). Cargo reads `[patch]` from the root manifest only, so a crate
+# that runs the prover repeats it rather than inheriting it. The two move
+# together; both return to a release tag once upstream ships all three.
+tlsn = { git = "https://github.com/libid-org/tlsn", rev = "550220ee18a8c0bb60217d58cb73f5fd2e74e441" }
+
+# TLSNotary #1173 (per-consumer RCOT instances) needs KOS instance-domain
+# separation, carried by libid-org/mpz on top of alpha.6 together with the
+# executor-lifetime fix and the typed `InstanceId` (libid-org/mpz#1). Cargo
+# ignores dependency-workspace patches, so this repeats the notary's pin; the
+# two must move together.
+[patch."https://github.com/privacy-ethereum/mpz"]
+clmul = { git = "https://github.com/libid-org/mpz", rev = "4db9454a0b6380f1a23a7b4807989d866f838fff" }
+matrix-transpose = { git = "https://github.com/libid-org/mpz", rev = "4db9454a0b6380f1a23a7b4807989d866f838fff" }
+mpz-circuits = { git = "https://github.com/libid-org/mpz", rev = "4db9454a0b6380f1a23a7b4807989d866f838fff" }
+mpz-circuits-core = { git = "https://github.com/libid-org/mpz", rev = "4db9454a0b6380f1a23a7b4807989d866f838fff" }
+mpz-circuits-data = { git = "https://github.com/libid-org/mpz", rev = "4db9454a0b6380f1a23a7b4807989d866f838fff" }
+mpz-cointoss = { git = "https://github.com/libid-org/mpz", rev = "4db9454a0b6380f1a23a7b4807989d866f838fff" }
+mpz-cointoss-core = { git = "https://github.com/libid-org/mpz", rev = "4db9454a0b6380f1a23a7b4807989d866f838fff" }
+mpz-common = { git = "https://github.com/libid-org/mpz", rev = "4db9454a0b6380f1a23a7b4807989d866f838fff" }
+mpz-core = { git = "https://github.com/libid-org/mpz", rev = "4db9454a0b6380f1a23a7b4807989d866f838fff" }
+mpz-fields = { git = "https://github.com/libid-org/mpz", rev = "4db9454a0b6380f1a23a7b4807989d866f838fff" }
+mpz-garble = { git = "https://github.com/libid-org/mpz", rev = "4db9454a0b6380f1a23a7b4807989d866f838fff" }
+mpz-garble-core = { git = "https://github.com/libid-org/mpz", rev = "4db9454a0b6380f1a23a7b4807989d866f838fff" }
+mpz-hash = { git = "https://github.com/libid-org/mpz", rev = "4db9454a0b6380f1a23a7b4807989d866f838fff" }
+mpz-ideal-vm = { git = "https://github.com/libid-org/mpz", rev = "4db9454a0b6380f1a23a7b4807989d866f838fff" }
+mpz-memory-core = { git = "https://github.com/libid-org/mpz", rev = "4db9454a0b6380f1a23a7b4807989d866f838fff" }
+mpz-ole = { git = "https://github.com/libid-org/mpz", rev = "4db9454a0b6380f1a23a7b4807989d866f838fff" }
+mpz-ole-core = { git = "https://github.com/libid-org/mpz", rev = "4db9454a0b6380f1a23a7b4807989d866f838fff" }
+mpz-ot = { git = "https://github.com/libid-org/mpz", rev = "4db9454a0b6380f1a23a7b4807989d866f838fff" }
+mpz-ot-core = { git = "https://github.com/libid-org/mpz", rev = "4db9454a0b6380f1a23a7b4807989d866f838fff" }
+mpz-share-conversion = { git = "https://github.com/libid-org/mpz", rev = "4db9454a0b6380f1a23a7b4807989d866f838fff" }
+mpz-share-conversion-core = { git = "https://github.com/libid-org/mpz", rev = "4db9454a0b6380f1a23a7b4807989d866f838fff" }
+mpz-vm-core = { git = "https://github.com/libid-org/mpz", rev = "4db9454a0b6380f1a23a7b4807989d866f838fff" }
+mpz-zk = { git = "https://github.com/libid-org/mpz", rev = "4db9454a0b6380f1a23a7b4807989d866f838fff" }
+mpz-zk-core = { git = "https://github.com/libid-org/mpz", rev = "4db9454a0b6380f1a23a7b4807989d866f838fff" }
