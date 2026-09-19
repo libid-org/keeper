@@ -37,9 +37,8 @@ services:
       retries: 30
 
   # The PUBLISHED notary image, pulled not built, so the rotation is proven
-  # against the binary a deployment runs. `custom-<sha>` is a commit build
-  # of the JWKS-free notary stack, until a notary release carries it. The
-  # pin lives here and nowhere else.
+  # against the binary a deployment runs. The pin lives here and nowhere
+  # else.
   notary:
     image: ghcr.io/libid-org/notary:0.3.0@sha256:73c35e549a4a41c114fddc7d37706e69bd65b7912718516d471708bfcf4c17b0
     environment:
@@ -53,9 +52,10 @@ services:
     ports:
       - "127.0.0.1:7047:7047"
     healthcheck:
-      # The image's own check (a TCP connect to the wire port, which accepts
-      # only once the signer is ready), every second instead of every 30 so
-      # `--wait` returns as soon as it is up.
+      # The image's own check GETs /healthcheck on the public port, which is
+      # off here; a TCP connect to the wire port, which accepts only once the
+      # signer is ready, every second so `--wait` returns as soon as it is up.
+      test: ["CMD", "nc", "-z", "127.0.0.1", "7047"]
       interval: 1s
       timeout: 5s
       retries: 60
