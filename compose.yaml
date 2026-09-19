@@ -41,7 +41,7 @@ services:
   # of the JWKS-free notary stack, until a notary release carries it. The
   # pin lives here and nowhere else.
   notary:
-    image: ghcr.io/libid-org/notary:custom-c957999
+    image: ghcr.io/libid-org/notary:0.3.0@sha256:73c35e549a4a41c114fddc7d37706e69bd65b7912718516d471708bfcf4c17b0
     environment:
       NOTARY_HOST: 0.0.0.0
       NOTARY_PORT: 7047
