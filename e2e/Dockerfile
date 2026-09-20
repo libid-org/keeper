@@ -20,9 +20,9 @@ WORKDIR /fetch
 RUN set -eu; \
     case "$TARGETARCH" in \
         amd64) triple=x86_64-unknown-linux-gnu; \
-               sha256=d066ff14082762a85e5a9249871a123d89d13b6685fd6bc4577eb644c8c1a688 ;; \
+               sha256=fab517471598f8fc299e75da2f03e1a528d045ce4483f67edf36284e5b317ad6 ;; \
         arm64) triple=aarch64-unknown-linux-gnu; \
-               sha256=f2553793729f23bffc98071d0d8a90d153c68f692aa889b3b0b669e31a7c5322 ;; \
+               sha256=620b7e98c9eea205b9501b5b051b887b0b971bb2c005979792c741dd603c1d5e ;; \
         *) echo "no libid-deploy release for $TARGETARCH" >&2; exit 1 ;; \
     esac; \
     repo="https://github.com/libid-org/chain-configurations"; \
