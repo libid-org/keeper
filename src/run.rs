@@ -107,7 +107,10 @@ pub async fn tick(
     let google_keys = match fetch_google_keys().await {
         Ok(keys) => keys,
         Err(e) => {
-            warn!(error = %e, "tick aborted: could not fetch Google's JWKS");
+            warn!(
+                error = format_args!("{e:#}"),
+                "tick aborted: could not fetch Google's JWKS"
+            );
             outcome.errors += 1;
             return outcome;
         }
@@ -145,7 +148,7 @@ pub async fn tick(
                 }
             }
             Err(e) => {
-                warn!(network = %network.name, error = %e, "network read failed");
+                warn!(network = %network.name, error = format_args!("{e:#}"), "network read failed");
                 outcome.errors += 1;
             }
         }
@@ -166,7 +169,10 @@ pub async fn tick(
     let source = match ProofSource::from_config(config) {
         Ok(source) => source,
         Err(e) => {
-            warn!(error = %e, "cannot obtain a notarized reading");
+            warn!(
+                error = format_args!("{e:#}"),
+                "cannot obtain a notarized reading"
+            );
             outcome.errors += 1;
             return outcome;
         }
@@ -174,7 +180,10 @@ pub async fn tick(
     let session = match source.obtain().await {
         Ok(session) => session,
         Err(e) => {
-            warn!(error = %e, "notarized JWKS reading failed");
+            warn!(
+                error = format_args!("{e:#}"),
+                "notarized JWKS reading failed"
+            );
             outcome.errors += 1;
             return outcome;
         }
@@ -189,7 +198,7 @@ pub async fn tick(
                 warn!(
                     network = %network.name,
                     contract = %network.google_jwt_roots,
-                    error = %e,
+                    error = format_args!("{e:#}"),
                     "rotation submission failed"
                 );
                 outcome.errors += 1;

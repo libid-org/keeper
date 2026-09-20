@@ -66,7 +66,7 @@ pub fn parse_google_jwks(body: &[u8]) -> Result<Vec<GoogleKey>> {
                 modulus_hash,
             }),
             Err(e) => {
-                warn!(kid = %jwk.kid, error = %e, "ignoring a key the contract would refuse")
+                warn!(kid = %jwk.kid, error = format_args!("{e:#}"), "ignoring a key the contract would refuse")
             }
         }
     }
