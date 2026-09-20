@@ -1,6 +1,6 @@
 [package]
 name = "keeper"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 # Inherited floor: libid-tlsn pulls the `tlsn` MPC graph (TLSNotary
 # alpha.15's `mpz` crates declare 1.95) and the AWS SDK crates via libid-signer
