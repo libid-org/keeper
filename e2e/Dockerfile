@@ -9,7 +9,7 @@
 # rather than promised. To move to a new release: bump the version and the
 # two checksums here, replace the committed copy, and the build tells you
 # if you forgot one.
-ARG CHAIN_CONFIGURATIONS_VERSION=0.11.0
+ARG CHAIN_CONFIGURATIONS_VERSION=0.12.0
 
 FROM alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce AS fetch
 ARG CHAIN_CONFIGURATIONS_VERSION
