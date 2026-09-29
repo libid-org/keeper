@@ -24,7 +24,7 @@
 # Pin the builder to bookworm so its glibc matches the bookworm-slim runtime
 # stage below. A bare `-slim` tag floats to newer Debian (trixie), producing
 # binaries that need GLIBC_2.38+ and fail on bookworm (glibc 2.36) at runtime.
-FROM rust:1.98.1-slim-bookworm@sha256:ebd900bae66fd508b466cef82d64a83a5fb34682e4c8b2797a42908bddc95a57 AS builder
+FROM rust:1.98.1-slim-bookworm@sha256:ff521445a372125ed4f76e1453a1f8098f2d05332d1601d30db1c1f62757e730 AS builder
 
 # git: the libid-rs and tlsn dependencies are git sources. Nothing else is
 # needed — the TLS stack is rustls (aws-lc-sys/ring), so there is no
@@ -52,7 +52,7 @@ COPY src/ src/
 RUN cargo build --locked --release
 
 # === Runtime ===
-FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171
+FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251
 
 # ca-certificates: outbound TLS to Google, to every configured RPC, and to AWS
 # KMS when a signer is a key id. libssl3 is deliberately not named: nothing

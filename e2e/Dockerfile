@@ -11,7 +11,7 @@
 # if you forgot one.
 ARG CHAIN_CONFIGURATIONS_VERSION=0.12.0
 
-FROM alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce AS fetch
+FROM alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6 AS fetch
 ARG CHAIN_CONFIGURATIONS_VERSION
 ARG TARGETARCH
 RUN apk add --no-cache curl
@@ -40,7 +40,7 @@ RUN cmp release-local-dev.toml local-dev.toml
 # The same runtime base, at the same digest, as the keeper's own image.
 # ca-certificates: the tool's HTTP client refuses to build without a CA
 # store, even though the only endpoint it reaches here is plain http.
-FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171
+FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251
 RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
 COPY --from=fetch /fetch/libid-deploy /usr/local/bin/libid-deploy
 COPY --from=fetch /fetch/local-dev.toml /e2e/local-dev.toml

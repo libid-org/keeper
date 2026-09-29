@@ -23,7 +23,7 @@ services:
   # The throwaway chain. Chain id 31337 and the funded dev accounts are
   # anvil's defaults, which local-dev.toml declares.
   anvil:
-    image: ghcr.io/foundry-rs/foundry:v1.7.1
+    image: ghcr.io/foundry-rs/foundry:v1.8.3
     # The image's entrypoint is `sh -c`, which takes ONE string and would
     # swallow a split command's flags; name the binary here instead.
     # 0.0.0.0: the default 127.0.0.1 is unreachable from `deploy`.
@@ -40,7 +40,7 @@ services:
   # against the binary a deployment runs. The pin lives here and nowhere
   # else.
   notary:
-    image: ghcr.io/libid-org/notary:0.3.0@sha256:73c35e549a4a41c114fddc7d37706e69bd65b7912718516d471708bfcf4c17b0
+    image: ghcr.io/libid-org/notary:0.4.0@sha256:64716b57a89b6b9e5f97f8908572f4f8901b16ba4a0d442a44129020a70f5878
     environment:
       NOTARY_HOST: 0.0.0.0
       NOTARY_PORT: 7047
@@ -87,7 +87,7 @@ services:
   # deployed chain but the test on the host, so this stands in for it: up
   # once `deploy` has succeeded, and nothing else.
   ready:
-    image: alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
+    image: alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
     command: sleep infinity
     depends_on:
       deploy:

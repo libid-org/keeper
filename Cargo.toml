@@ -42,10 +42,10 @@ libid-transcript = { git = "https://github.com/libid-org/libID-rs", tag = "v0.6.
 # `GoogleJwtRoots` verifies through the Notary Service (`rotate(bytes,bytes)
 # payable`, `quoteRotation()`), and it embeds the forge artifacts the e2e
 # deploys, which are not in git — so it cannot be taken from the repo.
-libid-contracts = "0.10.0"
+libid-contracts = "0.13.1"
 # Follows libid-contracts' alloy line. The bindings take and return alloy
 # types, so a 2.x here would be a second, incompatible `Provider`.
-alloy = { version = "1", features = [
+alloy = { version = "2", features = [
     "contract",
     "providers",
     "network",
