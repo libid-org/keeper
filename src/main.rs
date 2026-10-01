@@ -14,6 +14,7 @@ use keeper::{
     config::KeeperConfig,
     run,
 };
+use tracing_subscriber::EnvFilter;
 
 /// Keeps Google JWKS roots fresh on-chain, permissionlessly.
 #[derive(Parser, Debug)]
@@ -50,8 +51,7 @@ enum Command {
 fn main() -> ExitCode {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".parse().expect("static filter parses")),
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
