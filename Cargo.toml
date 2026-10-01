@@ -92,7 +92,7 @@ tempfile = "3"
 # instances). Cargo reads `[patch]` from the root manifest only, so a crate
 # that runs the prover repeats it rather than inheriting it. The two move
 # together; both return to a release tag once upstream ships all three.
-tlsn = { git = "https://github.com/libid-org/tlsn", rev = "550220ee18a8c0bb60217d58cb73f5fd2e74e441" }
+tlsn = { git = "https://github.com/libid-org/tlsn", rev = "da0f8488dfc55db8ed4271f817124306a2c07c09" }
 
 # TLSNotary #1173 (per-consumer RCOT instances) needs KOS instance-domain
 # separation, carried by libid-org/mpz on top of alpha.6 together with the
