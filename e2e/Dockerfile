@@ -9,7 +9,7 @@
 # rather than promised. To move to a new release: bump the version and the
 # two checksums here, replace the committed copy, and the build tells you
 # if you forgot one.
-ARG CHAIN_CONFIGURATIONS_VERSION=0.12.0
+ARG CHAIN_CONFIGURATIONS_VERSION=0.14.0
 
 FROM alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce AS fetch
 ARG CHAIN_CONFIGURATIONS_VERSION
@@ -20,9 +20,9 @@ WORKDIR /fetch
 RUN set -eu; \
     case "$TARGETARCH" in \
         amd64) triple=x86_64-unknown-linux-gnu; \
-               sha256=fab517471598f8fc299e75da2f03e1a528d045ce4483f67edf36284e5b317ad6 ;; \
+               sha256=131166dcc90dcbcbb9b10d471310ed34db30062328a5e5e03789d9636b61dc9c ;; \
         arm64) triple=aarch64-unknown-linux-gnu; \
-               sha256=620b7e98c9eea205b9501b5b051b887b0b971bb2c005979792c741dd603c1d5e ;; \
+               sha256=78d1a3eb9fca443ad5f5d260281fc89a239a190e838b0591000e44636d6795a3 ;; \
         *) echo "no libid-deploy release for $TARGETARCH" >&2; exit 1 ;; \
     esac; \
     repo="https://github.com/libid-org/chain-configurations"; \

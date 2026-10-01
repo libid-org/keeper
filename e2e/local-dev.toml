@@ -72,7 +72,10 @@ fee_wei = "1000000000000000"
 factory = "0xa92244c3f4462aad08bd1a33c3940b9b936321ad"
 notary_service = "0xbb5871167b0128939cab6850877981421e8dcbf5"
 ceremony_proof_verifier = "0x76bdc18f21c2db0ff796c7cc50348528b2899275"
-identity_names = "0xe78b53a183dd51763df44beb2500ddab9bb0329e"
+identity_registry = "0x0531b83b010a6b0c24c2c2c1a6beecc90cc71366"
+# Initialized with identity_registry above, which it resolves every handle
+# through for life: no setter moves it.
+handle_escrow = "0xf7e3ad279f913ffe2ef74614e3046c15cbdabb9a"
 google_jwt_roots = "0xb7a2ce28e71dbb9c877d2b5a48de33b5f0e6838d"
 x_platform_verifier = "0xcfc880f62f2744dc000687edf47a98b585d9eb35"
 github_platform_verifier = "0xac878389da7a1b58826182da0d8b4cae5e6e4178"
@@ -82,9 +85,8 @@ google_platform_verifier = "0xf3d537022362d187715b28bc547f8b2532e6d0cf"
 # carries them: `libid-contracts` embeds each circuit's bb-generated
 # UltraHonk verifier from the libid-circuits release it pins, and apply
 # deploys it through the factory under a CREATE3 name carrying that
-# release, on one shared copy of each library it links (CREATE2, at an
-# address derived from the library's bytecode), and reads its code hash
-# off the chain for the Platform Verifier to pin. Moving the contracts pin
-# to a new circuits release and re-applying is the rotation path — a new
-# release is a new name, a new address and a `setTrustRoots`, with the
-# proxy and its registration untouched.
+# release and reads its code hash off the chain for the Platform Verifier
+# to pin. Moving the contracts pin to a new circuits release and
+# re-applying is the rotation path — a new release is a new name, a new
+# address and a `setTrustRoots`, with the proxy and its registration
+# untouched.
