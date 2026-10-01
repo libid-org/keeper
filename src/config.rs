@@ -8,6 +8,11 @@
 //! Renames do, so the keeper accepts both spellings of the one field it wants:
 //! `[contracts].google_jwt_roots` (0.10 and later) and
 //! `[identity].identity_jwks_roots` (before it).
+//!
+//! A real network's file names no endpoint: where its node listens is a
+//! secret of the environment that reaches it, so the entry sets `rpc_url`
+//! beside `network_file`. A file that names one (local-dev, its compose
+//! service) is the default, and the entry's `rpc_url` wins over it.
 
 use std::{
     collections::HashSet,
@@ -76,15 +81,16 @@ pub struct NetworkEntry {
     /// Inline: network name (used in logs and the status table).
     #[serde(default)]
     pub name: Option<String>,
-    /// Inline: JSON-RPC endpoint.
+    /// JSON-RPC endpoint. Inline: required. By reference: required where the
+    /// file names none, and the one used where the file names its own.
     #[serde(default)]
     pub rpc_url: Option<String>,
     /// Inline: address of the `GoogleJwtRoots` proxy.
     #[serde(default)]
     pub google_jwt_roots: Option<String>,
     /// By reference: path to a chain-configurations network file, relative
-    /// to the keeper.toml that names it. Mutually exclusive with the inline
-    /// fields above — the file is the source of truth.
+    /// to the keeper.toml that names it. Mutually exclusive with `name` and
+    /// `google_jwt_roots` — the file is the source of truth for both.
     #[serde(default)]
     pub network_file: Option<PathBuf>,
     /// Per-network gas signer spec, overriding the global `signer`.
@@ -155,14 +161,12 @@ impl NetworkEntry {
             .or_else(|| global_signer.map(str::to_string));
         let resolved = match &self.network_file {
             Some(file) => {
-                if self.name.is_some()
-                    || self.rpc_url.is_some()
-                    || self.google_jwt_roots.is_some()
-                {
+                if self.name.is_some() || self.google_jwt_roots.is_some() {
                     bail!(
-                        "network entry referencing '{}' also sets inline fields — \
-                         the chain-configurations file is the source of truth; \
-                         only `signer` may accompany `network_file`",
+                        "network entry referencing '{}' also sets `name` or \
+                         `google_jwt_roots` — the chain-configurations file is the \
+                         source of truth for both; only `rpc_url` and `signer` may \
+                         accompany `network_file`",
                         file.display()
                     );
                 }
@@ -172,11 +176,21 @@ impl NetworkEntry {
                     base.join(file)
                 };
                 let parsed = NetworkFile::load(&path)?;
-                (
-                    parsed.network.name,
-                    parsed.network.rpc_url,
-                    parsed.google_jwt_roots,
-                )
+                let rpc_url = self
+                    .rpc_url
+                    .as_deref()
+                    .or_else(|| parsed.network.rpc_url())
+                    .with_context(|| {
+                        format!(
+                            "network '{}' has no endpoint: {} names no `rpc_url`, as a \
+                             real network's file does not, and its entry sets none — \
+                             set `rpc_url` beside `network_file`",
+                            parsed.network.name,
+                            path.display()
+                        )
+                    })?
+                    .to_string();
+                (parsed.network.name, rpc_url, parsed.google_jwt_roots)
             }
             None => {
                 let name = self
@@ -246,7 +260,21 @@ struct NetworkFile {
 #[derive(Debug, Clone, Deserialize)]
 struct NetworkFileNetwork {
     name: String,
-    rpc_url: String,
+    /// Present only where the endpoint is no secret: local-dev names its
+    /// compose service.
+    #[serde(default)]
+    rpc_url: Option<String>,
+}
+
+impl NetworkFileNetwork {
+    /// The endpoint the file names, if it names one: an absent or empty
+    /// `rpc_url` is none, as libid-deploy reads it.
+    fn rpc_url(&self) -> Option<&str> {
+        self.rpc_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+    }
 }
 
 /// `[contracts]` — absent section = nothing deployed on that network yet.
