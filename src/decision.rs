@@ -17,7 +17,6 @@ use base64::{
 use libid_crypto::keccak256;
 use num_bigint::BigUint;
 use serde::Deserialize;
-use tracing::warn;
 
 /// Google's JWKS endpoint — the same URL the notary attests.
 pub const GOOGLE_JWKS_URL: &str = "https://www.googleapis.com/oauth2/v3/certs";
@@ -66,7 +65,7 @@ pub fn parse_google_jwks(body: &[u8]) -> Result<Vec<GoogleKey>> {
                 modulus_hash,
             }),
             Err(e) => {
-                warn!(kid = %jwk.kid, error = format_args!("{e:#}"), "ignoring a key the contract would refuse")
+                tracing::warn!(kid = %jwk.kid, error = format_args!("{e:#}"), "ignoring a key the contract would refuse")
             }
         }
     }

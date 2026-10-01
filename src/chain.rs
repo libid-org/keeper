@@ -36,7 +36,6 @@ use anyhow::{
     Result,
 };
 use libid_contracts::bindings::ceremony::GoogleJwtRoots;
-use tracing::info;
 
 use crate::decision::{
     key_verdict,
@@ -134,7 +133,7 @@ pub async fn submit_rotation<P: Provider>(
         .call()
         .await
         .context("quoteRotation() failed")?;
-    info!(contract = %roots, fee_wei = %fee, "rotate() costs the Notary Fee");
+    tracing::info!(contract = %roots, fee_wei = %fee, "rotate() costs the Notary Fee");
     let tx = TransactionRequest::default()
         .with_to(roots)
         .with_value(fee)

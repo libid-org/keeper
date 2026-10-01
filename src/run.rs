@@ -8,10 +8,6 @@ use anyhow::{
     Result,
 };
 use libid_signer::SignerSource;
-use tracing::{
-    info,
-    warn,
-};
 
 use crate::{
     chain::{
@@ -107,7 +103,7 @@ pub async fn tick(
     let google_keys = match fetch_google_keys().await {
         Ok(keys) => keys,
         Err(e) => {
-            warn!(
+            tracing::warn!(
                 error = format_args!("{e:#}"),
                 "tick aborted: could not fetch Google's JWKS"
             );
@@ -115,7 +111,7 @@ pub async fn tick(
             return outcome;
         }
     };
-    info!(
+    tracing::info!(
         kids = ?google_keys.iter().map(|k| k.kid.as_str()).collect::<Vec<_>>(),
         "polled Google's live JWKS"
     );
@@ -130,7 +126,7 @@ pub async fn tick(
                 if reading.needs_rotation() {
                     outcome.rotations_needed += 1;
                     for (kid, verdict) in &reading.keys {
-                        info!(
+                        tracing::info!(
                             network = %network.name,
                             contract = %contract,
                             kid = %kid,
@@ -140,7 +136,7 @@ pub async fn tick(
                     }
                     needy.push((network, reading));
                 } else {
-                    info!(
+                    tracing::info!(
                         network = %network.name,
                         contract = %contract,
                         "up-to-date, no rotation needed"
@@ -148,7 +144,7 @@ pub async fn tick(
                 }
             }
             Err(e) => {
-                warn!(network = %network.name, error = format_args!("{e:#}"), "network read failed");
+                tracing::warn!(network = %network.name, error = format_args!("{e:#}"), "network read failed");
                 outcome.errors += 1;
             }
         }
@@ -158,7 +154,7 @@ pub async fn tick(
         return outcome;
     }
     if dry_run {
-        info!(
+        tracing::info!(
             networks = needy.len(),
             "dry run: rotations needed but not submitted"
         );
@@ -169,7 +165,7 @@ pub async fn tick(
     let source = match ProofSource::from_config(config) {
         Ok(source) => source,
         Err(e) => {
-            warn!(
+            tracing::warn!(
                 error = format_args!("{e:#}"),
                 "cannot obtain a notarized reading"
             );
@@ -180,7 +176,7 @@ pub async fn tick(
     let session = match source.obtain().await {
         Ok(session) => session,
         Err(e) => {
-            warn!(
+            tracing::warn!(
                 error = format_args!("{e:#}"),
                 "notarized JWKS reading failed"
             );
@@ -195,7 +191,7 @@ pub async fn tick(
         match submit_to(network, calldata.clone()).await {
             Ok(()) => outcome.rotations_submitted += 1,
             Err(e) => {
-                warn!(
+                tracing::warn!(
                     network = %network.name,
                     contract = %network.google_jwt_roots,
                     error = format_args!("{e:#}"),
@@ -250,7 +246,7 @@ async fn submit_to(network: &ResolvedNetwork, calldata: Vec<u8>) -> Result<()> {
         .connect(&network.rpc_url)
         .await
         .with_context(|| format!("connecting to {}", network.rpc_url))?;
-    info!(
+    tracing::info!(
         network = %network.name,
         contract = %network.google_jwt_roots,
         sender = %sender,
@@ -258,7 +254,7 @@ async fn submit_to(network: &ResolvedNetwork, calldata: Vec<u8>) -> Result<()> {
     );
     let (tx_hash, gas_used) =
         chain::submit_rotation(&provider, network.google_jwt_roots, calldata).await?;
-    info!(
+    tracing::info!(
         network = %network.name,
         contract = %network.google_jwt_roots,
         tx = %tx_hash,

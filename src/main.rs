@@ -14,10 +14,6 @@ use keeper::{
     config::KeeperConfig,
     run,
 };
-use tracing::{
-    info,
-    warn,
-};
 
 /// Keeps Google JWKS roots fresh on-chain, permissionlessly.
 #[derive(Parser, Debug)]
@@ -108,7 +104,7 @@ fn main() -> ExitCode {
         match cli.command {
             Command::Run { dry_run } => {
                 let interval = Duration::from_secs(config.poll_interval_secs);
-                info!(
+                tracing::info!(
                     networks = networks.len(),
                     poll_interval_secs = config.poll_interval_secs,
                     dry_run,
@@ -116,11 +112,11 @@ fn main() -> ExitCode {
                 );
                 loop {
                     let outcome = run::tick(&config, &networks, dry_run).await;
-                    info!(?outcome, "tick complete");
+                    tracing::info!(?outcome, "tick complete");
                     tokio::select! {
                         _ = tokio::time::sleep(interval) => {}
                         _ = tokio::signal::ctrl_c() => {
-                            info!("keeper shutting down");
+                            tracing::info!("keeper shutting down");
                             return ExitCode::SUCCESS;
                         }
                     }
@@ -128,11 +124,11 @@ fn main() -> ExitCode {
             }
             Command::Once { dry_run } => {
                 let outcome = run::tick(&config, &networks, dry_run).await;
-                info!(?outcome, "tick complete");
+                tracing::info!(?outcome, "tick complete");
                 if outcome.is_success() {
                     ExitCode::SUCCESS
                 } else {
-                    warn!("tick had failures");
+                    tracing::warn!("tick had failures");
                     ExitCode::FAILURE
                 }
             }
