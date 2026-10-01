@@ -45,7 +45,7 @@ libid-transcript = { git = "https://github.com/libid-org/libID-rs", tag = "v0.6.
 libid-contracts = "0.15.0"
 # Follows libid-contracts' alloy line. The bindings take and return alloy
 # types, so a 2.x here would be a second, incompatible `Provider`.
-alloy = { version = "1", features = [
+alloy = { version = "2", features = [
     "contract",
     "providers",
     "network",
