@@ -13,8 +13,8 @@
 # The test runs on the host and reads e2e/local-dev.toml — chain-
 # configurations' published file, unmodified — through the keeper's own
 # `network_file`. That file names the chain by this stack's service name,
-# `anvil`, so the host maps it: one line in /etc/hosts, `127.0.0.1 anvil`,
-# and the port published below.
+# `anvil`, which resolves only inside this network, so the test's entry
+# sets `rpc_url` to the port published below.
 #
 # Not a deployment: there is no keeper service here. The product image is
 # the Dockerfile at the root.

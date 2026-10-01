@@ -99,12 +99,6 @@ jobs:
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
-      # The published network file names the chain by its compose service
-      # name, and the test runs on the host: map the name to the published
-      # port.
-      - name: anvil resolves on the host
-        run: echo "127.0.0.1 anvil" | sudo tee -a /etc/hosts
-
       - name: Bring up the stack
         run: docker compose up -d --wait --build
 

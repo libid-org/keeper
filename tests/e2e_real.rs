@@ -12,7 +12,6 @@
 //! # Running it
 //!
 //! ```sh
-//! echo "127.0.0.1 anvil" | sudo tee -a /etc/hosts   # once per machine
 //! docker compose up -d --wait --build
 //! cargo test --test e2e_real -- --ignored --nocapture
 //! docker compose down                                # a fresh chain per run
@@ -22,16 +21,20 @@
 //!
 //! `e2e/local-dev.toml` is chain-configurations' published network file,
 //! byte for byte (the compose build proves it). The keeper reads it the way a
-//! deployment's `keeper.toml` does, through `network_file`: the chain, and
-//! the `GoogleJwtRoots` address, are whatever the keeper's own parser
-//! resolves from it, and everything this test drives comes from that
-//! resolution. Nothing here extracts an address by other means. The file
-//! names the chain by its compose service name, hence the hosts line above.
+//! deployment's `keeper.toml` does, through `network_file` with the endpoint
+//! in the entry's `rpc_url`: the network and the `GoogleJwtRoots` address are
+//! whatever the keeper's own parser resolves from the file, and everything
+//! this test drives comes from that resolution. Nothing here extracts an
+//! address by other means. The file names the chain by its compose service
+//! name, which resolves only inside the stack's network, so the entry names
+//! the port compose publishes on the host.
 //!
 //! * `KEEPER_E2E_NETWORK_FILE=<path>` -- drive another network file. Its
 //!   stack must be fresh (the test asserts a FIRST rotation), its Notary
 //!   Service must trust the key the notary signs with, and Anvil's dev key
 //!   #0 must be funded on its chain, since that key pays gas and the fee.
+//! * `KEEPER_E2E_RPC_URL=<url>` -- that chain's endpoint. Defaults to
+//!   `http://127.0.0.1:8545`, where compose publishes the stack's anvil.
 //! * `KEEPER_E2E_NOTARY=host:port` -- another notary. Defaults to
 //!   `127.0.0.1:7047`, where compose publishes the stack's.
 //! * `KEEPER_E2E_NOTARY_ADDRESS=0x…` -- the trusted notary address, when the
@@ -80,6 +83,8 @@ const GAS_KEY: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf
 /// with, so the deployed `NotaryService` trusts it.
 const NOTARY_KEY: &str =
     "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
+/// Where compose publishes the stack's anvil.
+const DEFAULT_RPC_URL: &str = "http://127.0.0.1:8545";
 /// Where compose publishes the stack's notary.
 const DEFAULT_NOTARY: &str = "127.0.0.1:7047";
 /// Google's live key set -- the same endpoint the notarized session reads.
@@ -99,6 +104,11 @@ fn network_file_under_test() -> PathBuf {
         .unwrap_or_else(|| {
             Path::new(env!("CARGO_MANIFEST_DIR")).join("e2e/local-dev.toml")
         })
+}
+
+/// The chain's endpoint, from `KEEPER_E2E_RPC_URL`, else the stack's anvil.
+fn rpc_url_under_test() -> String {
+    std::env::var("KEEPER_E2E_RPC_URL").unwrap_or_else(|_| DEFAULT_RPC_URL.to_string())
 }
 
 /// The notary this run talks to, from `KEEPER_E2E_NOTARY`, else the stack's.
@@ -149,13 +159,14 @@ async fn keeper_rotates_the_roots_through_a_real_notary() {
     let notary_addr = notary_under_test();
     let trusted = trusted_notary_address();
     let network_file = network_file_under_test();
+    let rpc_url = rpc_url_under_test();
 
-    // The keeper's view of the stack: the network file, by reference, the
-    // way a deployment's keeper.toml names it. The keeper's cheap poll reads
-    // Google's live endpoint, and its proof source is the notary over the
-    // wire. The resolved network -- its chain and its roots contract -- is
-    // what the rest of this test drives, so the parser is under test, not
-    // bypassed.
+    // The keeper's view of the stack: the network file, by reference, and
+    // the endpoint beside it, the way a deployment's keeper.toml names a
+    // network. The keeper's cheap poll reads Google's live endpoint, and its
+    // proof source is the notary over the wire. The resolved network -- its
+    // chain and its roots contract -- is what the rest of this test drives,
+    // so the parser is under test, not bypassed.
     let dir = tempfile::tempdir().unwrap();
     let path = write_keeper_toml(
         dir.path(),
@@ -163,7 +174,8 @@ async fn keeper_rotates_the_roots_through_a_real_notary() {
             "signer = \"{GAS_KEY}\"\n\
              notary_url = \"tcp://{notary_addr}\"\n\
              [[networks]]\n\
-             network_file = \"{}\"\n",
+             network_file = \"{}\"\n\
+             rpc_url = \"{rpc_url}\"\n",
             network_file.display()
         ),
     );
