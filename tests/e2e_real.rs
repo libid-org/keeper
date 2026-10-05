@@ -137,8 +137,8 @@ struct DeclaredContracts {
     notary_service: Address,
 }
 
-/// The notary's `createdAt`: bytes 32..40 of the section 9.1 record,
-/// big-endian, right after the 32-byte authority id.
+/// The notary's `createdAt`: bytes 32..40 of the platform-ceremonies section
+/// 4.1 record, big-endian, right after the 32-byte authority id.
 fn created_at(attested_data: &[u8]) -> u64 {
     u64::from_be_bytes(attested_data[32..40].try_into().unwrap())
 }

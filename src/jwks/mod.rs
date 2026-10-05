@@ -20,10 +20,10 @@
 //! The entry point is [`prover::notarize_jwks`]: it runs the MPC-TLS prover
 //! against a live notary over any async socket and reads the record back.
 
-/// The record as the notary hands it back: the section 9.1 attested data and
-/// the notary's signature over it, and nothing else. An alias of
-/// libid-transcript's wire struct, so the keeper and the notary agree on the
-/// frame by construction.
+/// The record as the notary hands it back: the platform-ceremonies section
+/// 4.1 attested data and the notary's signature over it, and nothing else. An
+/// alias of libid-transcript's wire struct, so the keeper and the notary agree
+/// on the frame by construction.
 pub type NotarizedSession = libid_transcript::AttestationWire;
 
 /// Errors from building or obtaining a JWKS reading.

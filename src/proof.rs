@@ -1,9 +1,9 @@
 //! Obtaining a [`NotarizedSession`] — the notarized reading of Google's JWKS:
 //! an MPC-TLS session against a running libid notary's TCP wire port, driven
 //! by this crate's own prover-side helpers
-//! ([`crate::jwks::prover::notarize_jwks`]). What comes back is the section
-//! 9.1 bytes and the notary's signature over them — exactly what
-//! `GoogleJwtRoots.rotate` takes.
+//! ([`crate::jwks::prover::notarize_jwks`]). What comes back is the
+//! platform-ceremonies section 4.1 bytes and the notary's signature over
+//! them — exactly what `GoogleJwtRoots.rotate` takes.
 
 use crate::jwks::NotarizedSession;
 use anyhow::{
