@@ -12,7 +12,6 @@ use anyhow::{
     Result,
 };
 use tokio::net::TcpStream;
-use tracing::info;
 
 use crate::config::KeeperConfig;
 
@@ -46,14 +45,14 @@ impl ProofSource {
     pub async fn obtain(&self) -> Result<NotarizedSession> {
         match self {
             Self::Notary(addr) => {
-                info!(notary = %addr, "starting MPC-TLS JWKS notarization");
+                tracing::info!(notary = %addr, "starting MPC-TLS JWKS notarization");
                 let socket = TcpStream::connect(addr)
                     .await
                     .with_context(|| format!("connecting to notary at {addr}"))?;
                 let session = crate::jwks::prover::notarize_jwks(socket)
                     .await
                     .context("MPC-TLS JWKS notarization failed")?;
-                info!(
+                tracing::info!(
                     attested_bytes = session.attested_data.len(),
                     "notary signed the JWKS reading"
                 );
