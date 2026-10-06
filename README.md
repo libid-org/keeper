@@ -13,14 +13,13 @@ The real rotation path: the published notary image, the contract stack
 is the stack; the test runs on the host and reads `e2e/local-dev.toml`,
 chain-configurations' published network file unmodified, through the
 keeper's own `network_file`. That file names the chain by its compose
-service name, so the host maps it once.
+service name, so the test's entry sets `rpc_url` to the port compose
+publishes on the host.
 
 Needs Docker with Compose v2.7 or later (`up --wait` over a one-shot
-service), a Rust toolchain, `sudo` for the hosts line, and network to
-Google.
+service), a Rust toolchain, and network to Google.
 
 ```sh
-echo "127.0.0.1 anvil" | sudo tee -a /etc/hosts   # once per machine
 docker compose up -d --wait --build
 cargo test --test e2e_real -- --ignored --nocapture
 docker compose down                                # a fresh chain per run
