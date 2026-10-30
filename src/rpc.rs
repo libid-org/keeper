@@ -114,7 +114,7 @@ impl fmt::Debug for RpcUrl {
 pub(crate) struct Redact(RpcUrl);
 
 /// A transport whose errors never name its endpoint.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(crate) struct Redacted<S> {
     inner: S,
     redact: Redact,
