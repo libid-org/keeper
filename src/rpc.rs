@@ -32,6 +32,7 @@ use alloy::{
         TransportFut,
     },
 };
+use reqwest::redirect::Policy;
 use tower::{
     Layer,
     Service,
@@ -58,16 +59,27 @@ pub enum RpcUrlError {
 }
 
 impl RpcUrl {
-    /// A client for this endpoint whose errors never name it.
-    pub fn client(&self) -> RpcClient {
-        ClientBuilder::default()
+    /// A client for this endpoint whose errors never name it. It follows no
+    /// redirect: the error of a redirected request names the URL the server
+    /// picked.
+    pub fn client(&self) -> reqwest::Result<RpcClient> {
+        let http = reqwest::Client::builder()
+            .redirect(Policy::none())
+            .build()?;
+        Ok(ClientBuilder::default()
             .layer(Redact(self.clone()))
-            .http(self.0.clone())
+            .http_with_client(http, self.0.clone()))
     }
 
-    /// `text` with the endpoint's URL replaced.
+    /// `text` with the endpoint's URL replaced, and its path and query too:
+    /// a server may echo the path it was asked for ("Cannot POST /v2/<key>").
     fn redact(&self, text: &str) -> String {
-        text.replace(self.0.as_str(), REDACTED)
+        let path = Some(self.0.path()).filter(|path| *path != "/");
+        [Some(self.0.as_str()), path, self.0.query()]
+            .into_iter()
+            .flatten()
+            .filter(|part| !part.is_empty())
+            .fold(text.to_owned(), |text, part| text.replace(part, REDACTED))
     }
 }
 
@@ -110,8 +122,8 @@ pub(crate) struct Redacted<S> {
 
 impl Redact {
     /// `error` without the endpoint. reqwest names the URL in every error it
-    /// returns, and alloy writes a failed read of an error body into the
-    /// HTTP error's body text.
+    /// returns, alloy writes a failed read of an error body into the HTTP
+    /// error's body text, and a server's own text may echo the path.
     fn apply(&self, error: TransportError) -> TransportError {
         match error {
             RpcError::Transport(TransportErrorKind::Custom(source)) => {
@@ -132,6 +144,10 @@ impl Redact {
                 error: self.http(error),
                 retry_after,
             }),
+            RpcError::DeserError { err, text } => RpcError::DeserError {
+                err,
+                text: self.0.redact(&text),
+            },
             other => other,
         }
     }
@@ -196,34 +212,49 @@ mod tests {
     use super::*;
 
     const KEY: &str = "fake-api-key";
+    const TOKEN: &str = "fake-token";
 
-    /// An endpoint that answers one request with a 500 whose body stops short
-    /// of its `content-length`, so the client's read of the error body fails.
-    struct CutOffErrorBody(TcpListener);
+    /// A 500 whose body stops short of its `content-length`, so the client's
+    /// read of the error body fails.
+    const CUT_OFF: &str =
+        "HTTP/1.1 500 Internal Server Error\r\ncontent-length: 64\r\n\r\ncut";
 
-    impl CutOffErrorBody {
-        const ANSWER: &[u8] =
-            b"HTTP/1.1 500 Internal Server Error\r\ncontent-length: 64\r\n\r\ncut";
+    /// A redirect to another path on the same host.
+    const REDIRECT: &str = "HTTP/1.1 307 Temporary Redirect\r\n\
+        location: /v3/other-key\r\ncontent-length: 0\r\n\r\n";
 
-        async fn bind() -> Self {
-            Self(TcpListener::bind("127.0.0.1:0").await.unwrap())
+    /// An endpoint that reads one request and sends a fixed answer back.
+    struct OneAnswer(TcpListener);
+
+    impl OneAnswer {
+        /// The error a call gets from an endpoint that answers `answer`.
+        async fn error_for(answer: String) -> TransportError {
+            let endpoint = Self(TcpListener::bind("127.0.0.1:0").await.unwrap());
+            let provider: RootProvider =
+                RootProvider::new(endpoint.rpc_url().client().unwrap());
+            let server = tokio::spawn(endpoint.send(answer));
+            let error = provider.get_block_number().await.unwrap_err();
+            server.await.unwrap();
+            error
         }
 
-        /// The endpoint's URL, holding [`KEY`] the way a hosted node's does.
+        /// The endpoint's URL, holding [`KEY`] in its path and [`TOKEN`] in its
+        /// query, the way hosted nodes hold their API keys.
         fn rpc_url(&self) -> RpcUrl {
-            format!("http://{}/v2/{KEY}", self.0.local_addr().unwrap())
+            let address = self.0.local_addr().unwrap();
+            format!("http://{address}/v2/{KEY}?token={TOKEN}")
                 .parse()
                 .unwrap()
         }
 
-        async fn answer(self) {
+        async fn send(self, answer: String) {
             let (stream, _) = self.0.accept().await.unwrap();
             let mut stream = BufReader::new(stream);
             let mut length = 0;
             loop {
                 let mut line = String::new();
-                stream.read_line(&mut line).await.unwrap();
-                if line == "\r\n" {
+                let read = stream.read_line(&mut line).await.unwrap();
+                if read == 0 || line == "\r\n" {
                     break;
                 }
                 if let Some((name, value)) = line.split_once(':') {
@@ -234,20 +265,14 @@ mod tests {
             }
             let mut body = vec![0; length];
             stream.read_exact(&mut body).await.unwrap();
-            stream.write_all(Self::ANSWER).await.unwrap();
+            stream.write_all(answer.as_bytes()).await.unwrap();
             stream.shutdown().await.unwrap();
         }
     }
 
     #[tokio::test]
     async fn a_cut_off_error_body_names_no_endpoint() {
-        let endpoint = CutOffErrorBody::bind().await;
-        let provider: RootProvider = RootProvider::new(endpoint.rpc_url().client());
-        let server = tokio::spawn(endpoint.answer());
-
-        let error = provider.get_block_number().await.unwrap_err();
-        server.await.unwrap();
-
+        let error = OneAnswer::error_for(CUT_OFF.to_owned()).await;
         let Some(TransportErrorKind::HttpError(HttpError { status, body })) =
             error.as_transport_err()
         else {
@@ -257,6 +282,51 @@ mod tests {
         assert!(body.contains("failed to read response body"), "{body}");
         assert!(body.contains(REDACTED), "{body}");
         assert!(!body.contains(KEY), "{body}");
+        assert!(!body.contains(TOKEN), "{body}");
+    }
+
+    #[tokio::test]
+    async fn an_error_body_that_echoes_the_path_names_no_endpoint() {
+        let error = OneAnswer::error_for(format!(
+            "HTTP/1.1 429 Too Many Requests\r\nretry-after: 1\r\nconnection: close\r\n\r\n\
+             no capacity left for POST /v2/{KEY}?token={TOKEN}"
+        ))
+        .await;
+        let Some(TransportErrorKind::HttpErrorWithRetryAfter {
+            error: HttpError { status, body },
+            ..
+        }) = error.as_transport_err()
+        else {
+            panic!("expected an HTTP error with a retry delay, got {error:?}");
+        };
+        assert_eq!(*status, 429);
+        assert_eq!(
+            body,
+            &format!("no capacity left for POST {REDACTED}?{REDACTED}")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_body_that_is_no_json_names_no_endpoint() {
+        let error = OneAnswer::error_for(format!(
+            "HTTP/1.1 200 OK\r\nconnection: close\r\n\r\nCannot POST /v2/{KEY}"
+        ))
+        .await;
+        let RpcError::DeserError { text, .. } = &error else {
+            panic!("expected a deserialization error, got {error:?}");
+        };
+        assert_eq!(text, &format!("Cannot POST {REDACTED}"));
+    }
+
+    #[tokio::test]
+    async fn a_redirect_is_not_followed() {
+        let error = OneAnswer::error_for(REDIRECT.to_owned()).await;
+        let Some(TransportErrorKind::HttpError(HttpError { status, .. })) =
+            error.as_transport_err()
+        else {
+            panic!("expected an HTTP error, got {error:?}");
+        };
+        assert_eq!(*status, 307);
     }
 
     #[test]

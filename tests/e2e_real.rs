@@ -195,7 +195,7 @@ async fn keeper_rotates_the_roots_through_a_real_notary() {
         .unwrap();
     let provider = ProviderBuilder::new()
         .wallet(wallet)
-        .connect_client(network.rpc_url.client());
+        .connect_client(network.rpc_url.client().unwrap());
 
     // The keys the chain must end up trusting: Google's live set, read the
     // same way the keeper's poll reads it. (Google rotating between this
