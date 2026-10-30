@@ -151,6 +151,43 @@ fn config_refuses_an_rpc_url_that_is_not_http() {
     assert!(!message.contains("fake-api-key"), "{message}");
 }
 
+/// A keeper.toml that does not parse is reported by line, never quoted: the
+/// line may hold an endpoint's API key.
+#[test]
+fn a_parse_error_names_the_line_not_its_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_keeper_toml(
+        dir.path(),
+        "[[networks]]\n\
+         name = \"n\"\n\
+         rpc_url = \"http://127.0.0.1:1/v2/fake-api-key\\q\"\n",
+    );
+    let err = KeeperConfig::load(&path).unwrap_err();
+    let message = format!("{err:#}");
+    assert!(message.contains("line 3, column 47: "), "{message}");
+    assert!(!message.contains("fake-api-key"), "{message}");
+}
+
+/// A network file that does not parse is placed the same way.
+#[test]
+fn a_network_file_parse_error_names_the_line() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("broken.toml"), "[network]\nname = n\n").unwrap();
+    let path = write_keeper_toml(
+        dir.path(),
+        "[[networks]]\n\
+         network_file = \"broken.toml\"\n\
+         rpc_url = \"http://127.0.0.1:1\"\n",
+    );
+    let err = KeeperConfig::load(&path).unwrap_err();
+    let message = format!("{err:#}");
+    assert!(
+        message.contains("broken.toml: line 2, column 8: "),
+        "{message}"
+    );
+    assert!(!message.contains("name = n"), "{message}");
+}
+
 // ── the endpoint of a referenced network ────────────────────────────────────
 
 /// A real network's file as chain-configurations ships it: no `rpc_url`.

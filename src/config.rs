@@ -29,6 +29,7 @@ use anyhow::{
     Result,
 };
 use serde::Deserialize;
+use toml::de;
 
 use crate::rpc::RpcUrl;
 
@@ -119,6 +120,45 @@ pub struct ResolvedNetwork {
     pub google_jwt_roots: Address,
 }
 
+/// A TOML document that does not parse, placed by line and column without the
+/// source line toml's own display quotes: a keeper.toml holds endpoint URLs
+/// and may hold a private key.
+#[derive(Debug, thiserror::Error)]
+enum TomlError {
+    /// An error toml placed in the document.
+    #[error("line {line}, column {column}: {message}")]
+    At {
+        line: usize,
+        column: usize,
+        message: String,
+    },
+    /// An error toml did not place.
+    #[error("{0}")]
+    Unplaced(String),
+}
+
+impl TomlError {
+    /// The error `toml` reported on `text`, without the source line it quotes.
+    fn of(text: &str, error: &de::Error) -> Self {
+        let message = error.message().to_owned();
+        let Some(span) = error.span() else {
+            return Self::Unplaced(message);
+        };
+        let before = text.get(..span.start).unwrap_or(text);
+        Self::At {
+            line: before.matches('\n').count() + 1,
+            column: before
+                .rsplit('\n')
+                .next()
+                .unwrap_or_default()
+                .chars()
+                .count()
+                + 1,
+            message,
+        }
+    }
+}
+
 impl KeeperConfig {
     /// Load and validate a keeper.toml. `path`'s parent directory anchors
     /// relative `network_file` references.
@@ -126,6 +166,7 @@ impl KeeperConfig {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("reading {}", path.display()))?;
         let config: Self = toml::from_str(&text)
+            .map_err(|error| TomlError::of(&text, &error))
             .with_context(|| format!("parsing {}", path.display()))?;
         let base = path.parent().unwrap_or_else(|| Path::new("."));
         let networks = config.resolve_networks(base)?;
@@ -308,6 +349,7 @@ impl NetworkFile {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("reading network file {}", path.display()))?;
         let parsed: Self = toml::from_str(&text)
+            .map_err(|error| TomlError::of(&text, &error))
             .with_context(|| format!("parsing network file {}", path.display()))?;
         // 0.10+ first, then the pre-0.10 spelling.
         let raw = parsed
