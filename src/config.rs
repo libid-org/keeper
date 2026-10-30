@@ -30,6 +30,8 @@ use anyhow::{
 };
 use serde::Deserialize;
 
+use crate::rpc::RpcUrl;
+
 /// Default poll interval: once an hour. Google rotates roughly weekly and
 /// a reading is trusted for 30 days, so an hour is comfortably tight.
 const DEFAULT_POLL_INTERVAL_SECS: u64 = 60 * 60;
@@ -110,7 +112,7 @@ pub struct ResolvedNetwork {
     /// Network name.
     pub name: String,
     /// JSON-RPC endpoint.
-    pub rpc_url: String,
+    pub rpc_url: RpcUrl,
     /// Gas signer spec (per-network override, else the global default).
     pub signer: Option<String>,
     /// The `GoogleJwtRoots` proxy on this network.
@@ -205,6 +207,9 @@ impl NetworkEntry {
             }
         };
         let (name, rpc_url, roots) = resolved;
+        let rpc_url: RpcUrl = rpc_url
+            .parse()
+            .with_context(|| format!("network '{name}': invalid rpc_url"))?;
         let Some(google_jwt_roots) = roots else {
             bail!(
                 "network '{name}' names no JWKS contract (set google_jwt_roots, \

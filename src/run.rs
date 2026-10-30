@@ -210,7 +210,7 @@ async fn read_network(
     network: &ResolvedNetwork,
     google_keys: &[GoogleKey],
 ) -> Result<RootsReading> {
-    let provider = ProviderBuilder::new().connect_client(network.rpc_client()?);
+    let provider = ProviderBuilder::new().connect_client(network.rpc_url.client());
     let now = chain::chain_now(&provider).await?;
     chain::read_roots(
         &provider,
@@ -240,7 +240,7 @@ async fn submit_to(network: &ResolvedNetwork, calldata: Vec<u8>) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("gas signer build: {e}"))?;
     let provider = ProviderBuilder::new()
         .wallet(wallet)
-        .connect_client(network.rpc_client()?);
+        .connect_client(network.rpc_url.client());
     tracing::info!(
         network = %network.name,
         contract = %network.google_jwt_roots,
@@ -335,7 +335,7 @@ mod tests {
     fn network(signer: Option<&str>) -> ResolvedNetwork {
         ResolvedNetwork {
             name: "n".into(),
-            rpc_url: format!("http://127.0.0.1:1/v2/{KEY}"),
+            rpc_url: format!("http://127.0.0.1:1/v2/{KEY}").parse().unwrap(),
             signer: signer.map(str::to_string),
             google_jwt_roots: Address::ZERO,
         }

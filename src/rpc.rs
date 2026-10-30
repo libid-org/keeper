@@ -1,10 +1,16 @@
-//! The JSON-RPC client every network read and rotation goes through. A hosted
-//! node's URL holds its API key (Alchemy's `/v2/<key>`) and every error ends
-//! up in the logs, so no error from this client names the endpoint.
+//! The JSON-RPC endpoint every network read and rotation goes through. A
+//! hosted node's URL holds its API key (Alchemy's `/v2/<key>`) and errors end
+//! up in the logs, so neither the endpoint's `Debug` nor an error from its
+//! client names more than the host.
 
-use std::task::{
-    Context,
-    Poll,
+use std::{
+    fmt,
+    net::SocketAddr,
+    str::FromStr,
+    task::{
+        Context,
+        Poll,
+    },
 };
 
 use alloy::{
@@ -26,45 +32,74 @@ use alloy::{
         TransportFut,
     },
 };
-use anyhow::{
-    bail,
-    Context as _,
-    Result,
-};
-use reqwest::Url;
 use tower::{
     Layer,
     Service,
 };
-
-use crate::config::ResolvedNetwork;
+use url::Url;
 
 /// What an error shows where the endpoint's URL stood.
 const REDACTED: &str = "<RPC_URL>";
 
-impl ResolvedNetwork {
-    /// A client for this network's endpoint whose errors never name it.
-    pub fn rpc_client(&self) -> Result<RpcClient> {
-        let endpoint: Url = self
-            .rpc_url
-            .parse()
-            .with_context(|| format!("network '{}': rpc_url is not a URL", self.name))?;
-        if !matches!(endpoint.scheme(), "http" | "https") {
-            bail!(
-                "network '{}': rpc_url has to be http or https, not {}",
-                self.name,
-                endpoint.scheme()
-            );
+/// An `http` or `https` JSON-RPC endpoint. It has no `Display`, and its
+/// `Debug` names only the host: the rest of the URL may hold an API key.
+#[derive(Clone, PartialEq, Eq)]
+pub struct RpcUrl(Url);
+
+/// An `rpc_url` the keeper cannot call.
+#[derive(Debug, thiserror::Error)]
+pub enum RpcUrlError {
+    /// Not a URL at all.
+    #[error(transparent)]
+    Url(#[from] url::ParseError),
+    /// A URL of another scheme.
+    #[error("the RPC URL has to be http or https, not {0}")]
+    Scheme(String),
+}
+
+impl RpcUrl {
+    /// A client for this endpoint whose errors never name it.
+    pub fn client(&self) -> RpcClient {
+        ClientBuilder::default()
+            .layer(Redact(self.clone()))
+            .http(self.0.clone())
+    }
+
+    /// `text` with the endpoint's URL replaced.
+    fn redact(&self, text: &str) -> String {
+        text.replace(self.0.as_str(), REDACTED)
+    }
+}
+
+impl FromStr for RpcUrl {
+    type Err = RpcUrlError;
+
+    /// `localhost:port` and `ip:port` mean plain HTTP, as alloy's `connect`
+    /// reads them.
+    fn from_str(url: &str) -> Result<Self, RpcUrlError> {
+        let url = if url.starts_with("localhost:") || url.parse::<SocketAddr>().is_ok() {
+            Url::parse(&format!("http://{url}"))
+        } else {
+            Url::parse(url)
+        }?;
+        match url.scheme() {
+            "http" | "https" => Ok(Self(url)),
+            other => Err(RpcUrlError::Scheme(other.to_string())),
         }
-        Ok(ClientBuilder::default()
-            .layer(Redact(endpoint.clone()))
-            .http(endpoint))
+    }
+}
+
+impl fmt::Debug for RpcUrl {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("RpcUrl")
+            .field(&self.0.host_str().unwrap_or_default())
+            .finish()
     }
 }
 
 /// The client layer that takes its endpoint out of every transport error.
 #[derive(Clone, Debug)]
-pub(crate) struct Redact(Url);
+pub(crate) struct Redact(RpcUrl);
 
 /// A transport whose errors never name its endpoint.
 #[derive(Clone, Debug)]
@@ -104,7 +139,7 @@ impl Redact {
     fn http(&self, error: HttpError) -> HttpError {
         HttpError {
             status: error.status,
-            body: error.body.replace(self.0.as_str(), REDACTED),
+            body: self.0.redact(&error.body),
         }
     }
 }
@@ -144,12 +179,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use alloy::{
-        primitives::Address,
-        providers::{
-            Provider,
-            RootProvider,
-        },
+    use alloy::providers::{
+        Provider,
+        RootProvider,
     };
     use tokio::{
         io::{
@@ -165,15 +197,6 @@ mod tests {
 
     const KEY: &str = "fake-api-key";
 
-    fn network(rpc_url: String) -> ResolvedNetwork {
-        ResolvedNetwork {
-            name: "n".into(),
-            rpc_url,
-            signer: None,
-            google_jwt_roots: Address::ZERO,
-        }
-    }
-
     /// An endpoint that answers one request with a 500 whose body stops short
     /// of its `content-length`, so the client's read of the error body fails.
     struct CutOffErrorBody(TcpListener);
@@ -187,8 +210,10 @@ mod tests {
         }
 
         /// The endpoint's URL, holding [`KEY`] the way a hosted node's does.
-        fn rpc_url(&self) -> String {
+        fn rpc_url(&self) -> RpcUrl {
             format!("http://{}/v2/{KEY}", self.0.local_addr().unwrap())
+                .parse()
+                .unwrap()
         }
 
         async fn answer(self) {
@@ -217,8 +242,7 @@ mod tests {
     #[tokio::test]
     async fn a_cut_off_error_body_names_no_endpoint() {
         let endpoint = CutOffErrorBody::bind().await;
-        let provider: RootProvider =
-            RootProvider::new(network(endpoint.rpc_url()).rpc_client().unwrap());
+        let provider: RootProvider = RootProvider::new(endpoint.rpc_url().client());
         let server = tokio::spawn(endpoint.answer());
 
         let error = provider.get_block_number().await.unwrap_err();
@@ -237,14 +261,33 @@ mod tests {
 
     #[test]
     fn a_websocket_endpoint_is_refused() {
-        let error = network(format!("ws://127.0.0.1:1/v2/{KEY}"))
-            .rpc_client()
+        let error = format!("ws://127.0.0.1:1/v2/{KEY}")
+            .parse::<RpcUrl>()
             .unwrap_err();
         assert!(
-            error
-                .to_string()
-                .contains("has to be http or https, not ws"),
-            "{error:#}"
+            matches!(&error, RpcUrlError::Scheme(scheme) if scheme == "ws"),
+            "{error:?}"
         );
+    }
+
+    #[test]
+    fn host_and_port_mean_plain_http() {
+        for (bare, full) in [
+            ("localhost:8545", "http://localhost:8545"),
+            ("127.0.0.1:8545", "http://127.0.0.1:8545"),
+        ] {
+            assert_eq!(
+                bare.parse::<RpcUrl>().unwrap(),
+                full.parse::<RpcUrl>().unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn debug_names_only_the_host() {
+        let url: RpcUrl = format!("https://eth-mainnet.g.alchemy.com/v2/{KEY}")
+            .parse()
+            .unwrap();
+        assert_eq!(format!("{url:?}"), r#"RpcUrl("eth-mainnet.g.alchemy.com")"#);
     }
 }
