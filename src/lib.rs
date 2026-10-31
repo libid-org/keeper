@@ -25,6 +25,7 @@ pub mod config;
 pub mod decision;
 pub mod jwks;
 pub mod proof;
+pub mod rpc;
 pub mod run;
 
 pub use config::KeeperConfig;

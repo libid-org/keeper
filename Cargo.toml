@@ -46,6 +46,7 @@ libid-contracts = "0.18"
 # second, incompatible `Provider`.
 alloy = { version = "2", features = [
     "contract",
+    "json-rpc",
     "providers",
     "network",
     "transport-http",
@@ -57,6 +58,7 @@ anyhow = "1"
 base64 = "0.23"
 clap = { version = "4", features = ["derive", "env"] }
 hex = "0.4"
+humantime-serde = "1"
 num-bigint = "0.5"
 # Plain-HTTPS fetch of Google's live JWKS (the cheap poll; notarization
 # happens only when a rotation is actually needed). The same 0.13 alloy's
@@ -79,8 +81,11 @@ tokio = { version = "1", features = [
     "signal",
 ] }
 toml = "1"
+# The RPC client's layers implement alloy's transport, a tower `Service`.
+tower = "0.5"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2"
 
 [dev-dependencies]
 tempfile = "3"

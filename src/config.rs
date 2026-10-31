@@ -20,15 +20,26 @@ use std::{
         Path,
         PathBuf,
     },
+    time::Duration,
 };
 
-use alloy::primitives::Address;
+use alloy::{
+    primitives::Address,
+    rpc::client::RpcClient,
+};
 use anyhow::{
     bail,
     Context,
     Result,
 };
 use serde::Deserialize;
+use toml::de;
+
+use crate::rpc::RpcUrl;
+
+/// Default RPC timeout: a node answers a read in well under a second, so a
+/// call still unanswered after half a minute is stuck.
+const DEFAULT_RPC_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Default poll interval: once an hour. Google rotates roughly weekly and
 /// a reading is trusted for 30 days, so an hour is comfortably tight.
@@ -54,6 +65,10 @@ pub struct KeeperConfig {
     /// seconds.
     #[serde(default = "default_renewal_threshold")]
     pub renewal_threshold_secs: u64,
+    /// How long one JSON-RPC call, and the connect under it, may go
+    /// unanswered before it fails (`"30s"`, `"2m"`).
+    #[serde(default = "default_rpc_timeout", with = "humantime_serde")]
+    pub rpc_timeout: Duration,
     /// Default gas signer spec for every network: a 64-char hex private key
     /// (with or without `0x`) or an AWS KMS id/alias/ARN. Classified by
     /// shape via `libid_signer::SignerSource::from_spec`.
@@ -70,6 +85,10 @@ fn default_poll_interval() -> u64 {
 
 fn default_renewal_threshold() -> u64 {
     DEFAULT_RENEWAL_THRESHOLD_SECS
+}
+
+fn default_rpc_timeout() -> Duration {
+    DEFAULT_RPC_TIMEOUT
 }
 
 /// One `[[networks]]` entry, before resolution. Either inline or by
@@ -110,11 +129,52 @@ pub struct ResolvedNetwork {
     /// Network name.
     pub name: String,
     /// JSON-RPC endpoint.
-    pub rpc_url: String,
+    pub rpc_url: RpcUrl,
+    /// How long one call to `rpc_url` may go unanswered.
+    pub rpc_timeout: Duration,
     /// Gas signer spec (per-network override, else the global default).
     pub signer: Option<String>,
     /// The `GoogleJwtRoots` proxy on this network.
     pub google_jwt_roots: Address,
+}
+
+/// A TOML document that does not parse, placed by line and column without the
+/// source line toml's own display quotes: a keeper.toml holds endpoint URLs
+/// and may hold a private key.
+#[derive(Debug, thiserror::Error)]
+enum TomlError {
+    /// An error toml placed in the document.
+    #[error("line {line}, column {column}: {message}")]
+    At {
+        line: usize,
+        column: usize,
+        message: String,
+    },
+    /// An error toml did not place.
+    #[error("{0}")]
+    Unplaced(String),
+}
+
+impl TomlError {
+    /// The error `toml` reported on `text`, without the source line it quotes.
+    fn of(text: &str, error: &de::Error) -> Self {
+        let message = error.message().to_owned();
+        let Some(span) = error.span() else {
+            return Self::Unplaced(message);
+        };
+        let before = text.get(..span.start).unwrap_or(text);
+        Self::At {
+            line: before.matches('\n').count() + 1,
+            column: before
+                .rsplit('\n')
+                .next()
+                .unwrap_or_default()
+                .chars()
+                .count()
+                + 1,
+            message,
+        }
+    }
 }
 
 impl KeeperConfig {
@@ -124,6 +184,7 @@ impl KeeperConfig {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("reading {}", path.display()))?;
         let config: Self = toml::from_str(&text)
+            .map_err(|error| TomlError::of(&text, &error))
             .with_context(|| format!("parsing {}", path.display()))?;
         let base = path.parent().unwrap_or_else(|| Path::new("."));
         let networks = config.resolve_networks(base)?;
@@ -139,7 +200,8 @@ impl KeeperConfig {
         let mut out = Vec::with_capacity(self.networks.len());
         let mut seen = HashSet::new();
         for entry in &self.networks {
-            let resolved = entry.resolve(base, self.signer.as_deref())?;
+            let resolved =
+                entry.resolve(base, self.signer.as_deref(), self.rpc_timeout)?;
             if !seen.insert(resolved.name.clone()) {
                 bail!("duplicate network name '{}'", resolved.name);
             }
@@ -154,6 +216,7 @@ impl NetworkEntry {
         &self,
         base: &Path,
         global_signer: Option<&str>,
+        rpc_timeout: Duration,
     ) -> Result<ResolvedNetwork> {
         let signer = self
             .signer
@@ -205,6 +268,9 @@ impl NetworkEntry {
             }
         };
         let (name, rpc_url, roots) = resolved;
+        let rpc_url: RpcUrl = rpc_url
+            .parse()
+            .with_context(|| format!("network '{name}': invalid rpc_url"))?;
         let Some(google_jwt_roots) = roots else {
             bail!(
                 "network '{name}' names no JWKS contract (set google_jwt_roots, \
@@ -214,9 +280,17 @@ impl NetworkEntry {
         Ok(ResolvedNetwork {
             name,
             rpc_url,
+            rpc_timeout,
             signer,
             google_jwt_roots,
         })
+    }
+}
+
+impl ResolvedNetwork {
+    /// A client for this network's endpoint, bounded by its `rpc_timeout`.
+    pub fn client(&self) -> reqwest::Result<RpcClient> {
+        self.rpc_url.client(self.rpc_timeout)
     }
 }
 
@@ -303,6 +377,7 @@ impl NetworkFile {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("reading network file {}", path.display()))?;
         let parsed: Self = toml::from_str(&text)
+            .map_err(|error| TomlError::of(&text, &error))
             .with_context(|| format!("parsing network file {}", path.display()))?;
         // 0.10+ first, then the pre-0.10 spelling.
         let raw = parsed

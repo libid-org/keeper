@@ -210,10 +210,7 @@ async fn read_network(
     network: &ResolvedNetwork,
     google_keys: &[GoogleKey],
 ) -> Result<RootsReading> {
-    let provider = ProviderBuilder::new()
-        .connect(&network.rpc_url)
-        .await
-        .with_context(|| format!("connecting to {}", network.rpc_url))?;
+    let provider = ProviderBuilder::new().connect_client(network.client()?);
     let now = chain::chain_now(&provider).await?;
     chain::read_roots(
         &provider,
@@ -243,9 +240,7 @@ async fn submit_to(network: &ResolvedNetwork, calldata: Vec<u8>) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("gas signer build: {e}"))?;
     let provider = ProviderBuilder::new()
         .wallet(wallet)
-        .connect(&network.rpc_url)
-        .await
-        .with_context(|| format!("connecting to {}", network.rpc_url))?;
+        .connect_client(network.client()?);
     tracing::info!(
         network = %network.name,
         contract = %network.google_jwt_roots,
@@ -330,14 +325,20 @@ fn human_secs(secs: u64) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use alloy::primitives::Address;
 
     use super::*;
 
+    /// The API key in [`network`]'s endpoint, which nothing listens on.
+    const KEY: &str = "fake-api-key";
+
     fn network(signer: Option<&str>) -> ResolvedNetwork {
         ResolvedNetwork {
             name: "n".into(),
-            rpc_url: "http://127.0.0.1:1".into(),
+            rpc_url: format!("http://127.0.0.1:1/v2/{KEY}").parse().unwrap(),
+            rpc_timeout: Duration::from_secs(10),
             signer: signer.map(str::to_string),
             google_jwt_roots: Address::ZERO,
         }
@@ -380,5 +381,26 @@ mod tests {
             network(Some("alias/keeper-gas")),
         ];
         check_can_submit(&config(Some("tcp://127.0.0.1:7047")), &networks).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_failed_read_names_no_endpoint() {
+        let error = read_network(&config(None), &network(None), &[])
+            .await
+            .unwrap_err();
+        let message = format!("{error:#} {error:?}");
+        assert!(message.contains("error sending request"), "{message}");
+        assert!(!message.contains(KEY), "{message}");
+    }
+
+    #[tokio::test]
+    async fn a_failed_submission_names_no_endpoint() {
+        let error = submit_to(&network(Some(&"ab".repeat(32))), Vec::new())
+            .await
+            .unwrap_err();
+        let message = format!("{error:#} {error:?}");
+        assert!(message.contains("quoteRotation() failed"), "{message}");
+        assert!(message.contains("error sending request"), "{message}");
+        assert!(!message.contains(KEY), "{message}");
     }
 }

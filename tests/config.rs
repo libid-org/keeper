@@ -2,9 +2,15 @@
 //! file, the strictness a `keeper.toml` is held to, and where a referenced
 //! network's endpoint comes from.
 
-use std::path::Path;
+use std::{
+    path::Path,
+    time::Duration,
+};
 
-use keeper::config::KeeperConfig;
+use keeper::{
+    config::KeeperConfig,
+    rpc::RpcUrl,
+};
 
 /// Write `keeper.toml` (and return its path) inside `dir`.
 fn write_keeper_toml(dir: &Path, contents: &str) -> std::path::PathBuf {
@@ -125,6 +131,111 @@ fn config_refuses_duplicate_network_names() {
     );
 }
 
+/// `rpc_timeout` reads as a humantime duration and bounds every network's
+/// calls.
+#[test]
+fn rpc_timeout_reaches_every_network() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_keeper_toml(
+        dir.path(),
+        "rpc_timeout = \"2m\"\n\
+         [[networks]]\n\
+         name = \"a\"\n\
+         rpc_url = \"http://127.0.0.1:1\"\n\
+         google_jwt_roots = \"0x69cc7c69b39ada71ce908d432868d5ef9a6a6d0e\"\n\
+         [[networks]]\n\
+         name = \"b\"\n\
+         rpc_url = \"http://127.0.0.1:2\"\n\
+         google_jwt_roots = \"0x69cc7c69b39ada71ce908d432868d5ef9a6a6d0e\"\n",
+    );
+    let (config, networks) = KeeperConfig::load(&path).unwrap();
+    assert_eq!(config.rpc_timeout, Duration::from_secs(120));
+    let timeouts: Vec<_> = networks.iter().map(|network| network.rpc_timeout).collect();
+    assert_eq!(timeouts, [Duration::from_secs(120); 2]);
+}
+
+/// A timeout without its unit is refused, never read as seconds.
+#[test]
+fn rpc_timeout_needs_a_unit() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_keeper_toml(
+        dir.path(),
+        "rpc_timeout = \"30\"\n\
+         [[networks]]\n\
+         name = \"n\"\n\
+         rpc_url = \"http://127.0.0.1:1\"\n\
+         google_jwt_roots = \"0x69cc7c69b39ada71ce908d432868d5ef9a6a6d0e\"\n",
+    );
+    let err = KeeperConfig::load(&path).unwrap_err();
+    let message = format!("{err:#}");
+    assert!(
+        message.contains(
+            "line 1, column 15: invalid value: string \"30\", expected a duration"
+        ),
+        "{message}"
+    );
+}
+
+/// An endpoint the keeper cannot call is refused at load, by the network's
+/// name: the URL may hold an API key.
+#[test]
+fn config_refuses_an_rpc_url_that_is_not_http() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_keeper_toml(
+        dir.path(),
+        "[[networks]]\n\
+         name = \"n\"\n\
+         rpc_url = \"wss://node.example/v2/fake-api-key\"\n\
+         google_jwt_roots = \"0x69cc7c69b39ada71ce908d432868d5ef9a6a6d0e\"\n",
+    );
+    let err = KeeperConfig::load(&path).unwrap_err();
+    let message = format!("{err:#}");
+    assert!(
+        message.contains(
+            "network 'n': invalid rpc_url: the RPC URL has to be http or https, not wss"
+        ),
+        "{message}"
+    );
+    assert!(!message.contains("fake-api-key"), "{message}");
+}
+
+/// A keeper.toml that does not parse is reported by line, never quoted: the
+/// line may hold an endpoint's API key.
+#[test]
+fn a_parse_error_names_the_line_not_its_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_keeper_toml(
+        dir.path(),
+        "[[networks]]\n\
+         name = \"n\"\n\
+         rpc_url = \"http://127.0.0.1:1/v2/fake-api-key\\q\"\n",
+    );
+    let err = KeeperConfig::load(&path).unwrap_err();
+    let message = format!("{err:#}");
+    assert!(message.contains("line 3, column 47: "), "{message}");
+    assert!(!message.contains("fake-api-key"), "{message}");
+}
+
+/// A network file that does not parse is placed the same way.
+#[test]
+fn a_network_file_parse_error_names_the_line() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("broken.toml"), "[network]\nname = n\n").unwrap();
+    let path = write_keeper_toml(
+        dir.path(),
+        "[[networks]]\n\
+         network_file = \"broken.toml\"\n\
+         rpc_url = \"http://127.0.0.1:1\"\n",
+    );
+    let err = KeeperConfig::load(&path).unwrap_err();
+    let message = format!("{err:#}");
+    assert!(
+        message.contains("broken.toml: line 2, column 8: "),
+        "{message}"
+    );
+    assert!(!message.contains("name = n"), "{message}");
+}
+
 // ── the endpoint of a referenced network ────────────────────────────────────
 
 /// A real network's file as chain-configurations ships it: no `rpc_url`.
@@ -161,7 +272,10 @@ fn network_file_without_an_endpoint_takes_the_entrys_rpc_url() {
         panic!("one entry resolves to one network, got {networks:?}");
     };
     assert_eq!(network.name, "sepolia");
-    assert_eq!(network.rpc_url, "https://sepolia.example/v2/key");
+    assert_eq!(
+        network.rpc_url,
+        "https://sepolia.example/v2/key".parse::<RpcUrl>().unwrap()
+    );
 }
 
 /// Neither the file nor the entry names an endpoint: the load fails, and the
@@ -231,7 +345,10 @@ fn network_file_endpoint_serves_an_entry_that_sets_none() {
         panic!("one entry resolves to one network, got {networks:?}");
     };
     assert_eq!(network.name, "local-dev");
-    assert_eq!(network.rpc_url, "http://anvil:8545");
+    assert_eq!(
+        network.rpc_url,
+        "http://anvil:8545".parse::<RpcUrl>().unwrap()
+    );
 }
 
 /// Where the file names an endpoint, the entry's `rpc_url` wins: local-dev's
@@ -253,7 +370,10 @@ fn entry_rpc_url_wins_over_the_network_files_endpoint() {
         panic!("one entry resolves to one network, got {networks:?}");
     };
     assert_eq!(network.name, "local-dev");
-    assert_eq!(network.rpc_url, "http://127.0.0.1:8545");
+    assert_eq!(
+        network.rpc_url,
+        "http://127.0.0.1:8545".parse::<RpcUrl>().unwrap()
+    );
 }
 
 /// The file stays the source of truth for the network's name and its
