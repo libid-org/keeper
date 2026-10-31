@@ -2,7 +2,10 @@
 //! file, the strictness a `keeper.toml` is held to, and where a referenced
 //! network's endpoint comes from.
 
-use std::path::Path;
+use std::{
+    path::Path,
+    time::Duration,
+};
 
 use keeper::{
     config::KeeperConfig,
@@ -125,6 +128,51 @@ fn config_refuses_duplicate_network_names() {
     assert!(
         err.to_string().contains("duplicate network name"),
         "{err:#}"
+    );
+}
+
+/// `rpc_timeout` reads as a humantime duration and bounds every network's
+/// calls.
+#[test]
+fn rpc_timeout_reaches_every_network() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_keeper_toml(
+        dir.path(),
+        "rpc_timeout = \"2m\"\n\
+         [[networks]]\n\
+         name = \"a\"\n\
+         rpc_url = \"http://127.0.0.1:1\"\n\
+         google_jwt_roots = \"0x69cc7c69b39ada71ce908d432868d5ef9a6a6d0e\"\n\
+         [[networks]]\n\
+         name = \"b\"\n\
+         rpc_url = \"http://127.0.0.1:2\"\n\
+         google_jwt_roots = \"0x69cc7c69b39ada71ce908d432868d5ef9a6a6d0e\"\n",
+    );
+    let (config, networks) = KeeperConfig::load(&path).unwrap();
+    assert_eq!(config.rpc_timeout, Duration::from_secs(120));
+    let timeouts: Vec<_> = networks.iter().map(|network| network.rpc_timeout).collect();
+    assert_eq!(timeouts, [Duration::from_secs(120); 2]);
+}
+
+/// A timeout without its unit is refused, never read as seconds.
+#[test]
+fn rpc_timeout_needs_a_unit() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_keeper_toml(
+        dir.path(),
+        "rpc_timeout = \"30\"\n\
+         [[networks]]\n\
+         name = \"n\"\n\
+         rpc_url = \"http://127.0.0.1:1\"\n\
+         google_jwt_roots = \"0x69cc7c69b39ada71ce908d432868d5ef9a6a6d0e\"\n",
+    );
+    let err = KeeperConfig::load(&path).unwrap_err();
+    let message = format!("{err:#}");
+    assert!(
+        message.contains(
+            "line 1, column 15: invalid value: string \"30\", expected a duration"
+        ),
+        "{message}"
     );
 }
 

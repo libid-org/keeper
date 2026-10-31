@@ -58,6 +58,7 @@ anyhow = "1"
 base64 = "0.23"
 clap = { version = "4", features = ["derive", "env"] }
 hex = "0.4"
+humantime-serde = "1"
 num-bigint = "0.5"
 # Plain-HTTPS fetch of Google's live JWKS (the cheap poll; notarization
 # happens only when a rotation is actually needed). The same 0.13 alloy's
