@@ -12,9 +12,13 @@ use clap::{
 };
 use keeper::{
     config::KeeperConfig,
+    logs::Logs,
     run,
 };
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::{
+    util::SubscriberInitExt,
+    EnvFilter,
+};
 
 /// Keeps Google JWKS roots fresh on-chain, permissionlessly.
 #[derive(Parser, Debug)]
@@ -49,11 +53,12 @@ enum Command {
 }
 
 fn main() -> ExitCode {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .init();
+    Logs {
+        filter: EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+        writer: std::io::stdout,
+    }
+    .subscriber()
+    .init();
 
     let cli = Cli::parse();
     let (config, networks) = match KeeperConfig::load(&cli.config) {

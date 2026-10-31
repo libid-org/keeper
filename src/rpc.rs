@@ -1,8 +1,9 @@
 //! The JSON-RPC endpoint every network read and rotation goes through. A
 //! hosted node's URL holds its API key (Alchemy's `/v2/<key>`) and errors end
 //! up in the logs, so neither the endpoint's `Debug` nor an error from its
-//! client names more than the host. Each call fails once its endpoint leaves
-//! it unanswered past the configured limit.
+//! client names more than the host; [`Logs`](crate::logs::Logs) keeps alloy's
+//! transport span, which names the whole URL, out of the logs. Each call
+//! fails once its endpoint leaves it unanswered past the configured limit.
 
 mod deadline;
 
