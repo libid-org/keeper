@@ -1,7 +1,10 @@
 //! The JSON-RPC endpoint every network read and rotation goes through. A
 //! hosted node's URL holds its API key (Alchemy's `/v2/<key>`) and errors end
 //! up in the logs, so neither the endpoint's `Debug` nor an error from its
-//! client names more than the host.
+//! client names more than the host. Each call fails once its endpoint leaves
+//! it unanswered past the configured limit.
+
+mod deadline;
 
 use std::{
     fmt,
@@ -11,6 +14,7 @@ use std::{
         Context,
         Poll,
     },
+    time::Duration,
 };
 
 use alloy::{
@@ -39,6 +43,8 @@ use tower::{
 };
 use url::Url;
 
+use self::deadline::Deadline;
+
 /// What an error shows where the endpoint's URL stood.
 const REDACTED: &str = "<RPC_URL>";
 
@@ -59,15 +65,18 @@ pub enum RpcUrlError {
 }
 
 impl RpcUrl {
-    /// A client for this endpoint whose errors never name it. It follows no
+    /// A client for this endpoint whose errors never name it, each call and
+    /// each connect failing once unanswered for `limit`. It follows no
     /// redirect: the error of a redirected request names the URL the server
     /// picked.
-    pub fn client(&self) -> reqwest::Result<RpcClient> {
+    pub fn client(&self, limit: Duration) -> reqwest::Result<RpcClient> {
         let http = reqwest::Client::builder()
             .redirect(Policy::none())
+            .connect_timeout(limit)
             .build()?;
         Ok(ClientBuilder::default()
             .layer(Redact(self.clone()))
+            .layer(Deadline(limit))
             .http_with_client(http, self.0.clone()))
     }
 
@@ -209,10 +218,16 @@ mod tests {
         net::TcpListener,
     };
 
-    use super::*;
+    use super::{
+        deadline::Unanswered,
+        *,
+    };
 
     const KEY: &str = "fake-api-key";
     const TOKEN: &str = "fake-token";
+
+    /// The limit of a call to an endpoint that answers at once.
+    const PATIENCE: Duration = Duration::from_secs(10);
 
     /// A 500 whose body stops short of its `content-length`, so the client's
     /// read of the error body fails.
@@ -231,7 +246,7 @@ mod tests {
         async fn error_for(answer: String) -> TransportError {
             let endpoint = Self(TcpListener::bind("127.0.0.1:0").await.unwrap());
             let provider: RootProvider =
-                RootProvider::new(endpoint.rpc_url().client().unwrap());
+                RootProvider::new(endpoint.rpc_url().client(PATIENCE).unwrap());
             let server = tokio::spawn(endpoint.send(answer));
             let error = provider.get_block_number().await.unwrap_err();
             server.await.unwrap();
@@ -327,6 +342,27 @@ mod tests {
             panic!("expected an HTTP error, got {error:?}");
         };
         assert_eq!(*status, 307);
+    }
+
+    /// An endpoint whose port takes the connection but never answers fails
+    /// the call at its limit.
+    #[tokio::test]
+    async fn a_call_left_unanswered_fails_at_the_deadline() {
+        let silent = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let rpc_url: RpcUrl = format!("http://{}", silent.local_addr().unwrap())
+            .parse()
+            .unwrap();
+        let limit = Duration::from_millis(200);
+        let provider: RootProvider = RootProvider::new(rpc_url.client(limit).unwrap());
+        let error = tokio::time::timeout(PATIENCE, provider.get_block_number())
+            .await
+            .expect("the call gave up at its deadline")
+            .unwrap_err();
+        let Some(TransportErrorKind::Custom(source)) = error.as_transport_err() else {
+            panic!("expected the deadline's error, got {error:?}");
+        };
+        assert_eq!(source.downcast_ref(), Some(&Unanswered(limit)));
+        drop(silent);
     }
 
     #[test]

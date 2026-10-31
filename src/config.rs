@@ -20,9 +20,13 @@ use std::{
         Path,
         PathBuf,
     },
+    time::Duration,
 };
 
-use alloy::primitives::Address;
+use alloy::{
+    primitives::Address,
+    rpc::client::RpcClient,
+};
 use anyhow::{
     bail,
     Context,
@@ -32,6 +36,10 @@ use serde::Deserialize;
 use toml::de;
 
 use crate::rpc::RpcUrl;
+
+/// Default RPC timeout: a node answers a read in well under a second, so a
+/// call still unanswered after half a minute is stuck.
+const DEFAULT_RPC_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Default poll interval: once an hour. Google rotates roughly weekly and
 /// a reading is trusted for 30 days, so an hour is comfortably tight.
@@ -57,6 +65,10 @@ pub struct KeeperConfig {
     /// seconds.
     #[serde(default = "default_renewal_threshold")]
     pub renewal_threshold_secs: u64,
+    /// How long one JSON-RPC call, and the connect under it, may go
+    /// unanswered before it fails (`"30s"`, `"2m"`).
+    #[serde(default = "default_rpc_timeout", with = "humantime_serde")]
+    pub rpc_timeout: Duration,
     /// Default gas signer spec for every network: a 64-char hex private key
     /// (with or without `0x`) or an AWS KMS id/alias/ARN. Classified by
     /// shape via `libid_signer::SignerSource::from_spec`.
@@ -73,6 +85,10 @@ fn default_poll_interval() -> u64 {
 
 fn default_renewal_threshold() -> u64 {
     DEFAULT_RENEWAL_THRESHOLD_SECS
+}
+
+fn default_rpc_timeout() -> Duration {
+    DEFAULT_RPC_TIMEOUT
 }
 
 /// One `[[networks]]` entry, before resolution. Either inline or by
@@ -114,6 +130,8 @@ pub struct ResolvedNetwork {
     pub name: String,
     /// JSON-RPC endpoint.
     pub rpc_url: RpcUrl,
+    /// How long one call to `rpc_url` may go unanswered.
+    pub rpc_timeout: Duration,
     /// Gas signer spec (per-network override, else the global default).
     pub signer: Option<String>,
     /// The `GoogleJwtRoots` proxy on this network.
@@ -182,7 +200,8 @@ impl KeeperConfig {
         let mut out = Vec::with_capacity(self.networks.len());
         let mut seen = HashSet::new();
         for entry in &self.networks {
-            let resolved = entry.resolve(base, self.signer.as_deref())?;
+            let resolved =
+                entry.resolve(base, self.signer.as_deref(), self.rpc_timeout)?;
             if !seen.insert(resolved.name.clone()) {
                 bail!("duplicate network name '{}'", resolved.name);
             }
@@ -197,6 +216,7 @@ impl NetworkEntry {
         &self,
         base: &Path,
         global_signer: Option<&str>,
+        rpc_timeout: Duration,
     ) -> Result<ResolvedNetwork> {
         let signer = self
             .signer
@@ -260,9 +280,17 @@ impl NetworkEntry {
         Ok(ResolvedNetwork {
             name,
             rpc_url,
+            rpc_timeout,
             signer,
             google_jwt_roots,
         })
+    }
+}
+
+impl ResolvedNetwork {
+    /// A client for this network's endpoint, bounded by its `rpc_timeout`.
+    pub fn client(&self) -> reqwest::Result<RpcClient> {
+        self.rpc_url.client(self.rpc_timeout)
     }
 }
 
