@@ -24,6 +24,7 @@ pub mod chain;
 pub mod config;
 pub mod decision;
 pub mod jwks;
+pub mod logs;
 pub mod proof;
 pub mod rpc;
 pub mod run;
