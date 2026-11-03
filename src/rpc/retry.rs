@@ -4,6 +4,8 @@
 //! says nothing about the request itself, and the error of the last try is
 //! returned as it came, so the logs keep its status and body. alloy's
 //! `RetryBackoffLayer` replaces that error with a "Max retries exceeded" text.
+//! A transaction is sent once: resent after its first send landed, it comes
+//! back "already known" or "nonce too low", which reads as a failure.
 
 use std::{
     task::{
@@ -37,13 +39,13 @@ use super::deadline::Unanswered;
 /// deadline is tried again at most once, so an endpoint that never answers
 /// fails a call within two deadlines.
 #[derive(Clone, Copy, Debug)]
-pub struct Retry {
+pub(crate) struct Retry {
     backoff: &'static [Duration],
 }
 
 /// A transport whose calls are sent again after a transient error.
 #[derive(Clone, Debug)]
-pub struct Retrying<S> {
+pub(crate) struct Retrying<S> {
     inner: S,
     retry: Retry,
 }
@@ -58,10 +60,10 @@ enum Transient {
 }
 
 impl Retry {
-    /// For calls that are safe to send twice: five more tries, 0.2 s to 3.2 s
-    /// apart, about 6 s in all. Eden's 503 outages over 72 h of mainnet lasted
-    /// up to 3.5 s; an endpoint still failing after them is down for the tick.
-    pub const READS: Self = Self {
+    /// Five more tries, 0.2 s to 3.2 s apart, about 6 s in all. Eden's 503
+    /// outages over 72 h of mainnet lasted up to 3.5 s; an endpoint still
+    /// failing after them is down for the tick.
+    pub(crate) const STANDARD: Self = Self {
         backoff: &[
             Duration::from_millis(200),
             Duration::from_millis(400),
@@ -71,10 +73,13 @@ impl Retry {
         ],
     };
 
-    /// Every call sent once. A transaction resent after its first send landed
-    /// comes back "already known" or "nonce too low", which reads as a failure.
-    pub const NONE: Self = Self { backoff: &[] };
+    /// Every call sent once.
+    #[cfg(test)]
+    pub(crate) const NONE: Self = Self { backoff: &[] };
 }
+
+/// The methods that send a transaction, which no error sends again.
+const SENT_ONCE: [&str; 2] = ["eth_sendRawTransaction", "eth_sendTransaction"];
 
 impl<S> Layer<S> for Retry {
     type Service = Retrying<S>;
@@ -106,7 +111,11 @@ where
     fn call(&mut self, request: RequestPacket) -> TransportFut<'static> {
         let ready = self.inner.clone();
         let mut inner = std::mem::replace(&mut self.inner, ready);
-        let mut waits = self.retry.backoff.iter();
+        let sends = request
+            .method_names()
+            .any(|method| SENT_ONCE.contains(&method));
+        let backoff = if sends { &[] } else { self.retry.backoff };
+        let mut waits = backoff.iter();
         Box::pin(async move {
             let mut waited_out = false;
             loop {
@@ -123,7 +132,7 @@ where
                 };
                 match waits.next() {
                     Some(wait) if again => {
-                        tracing::debug!(%error, ?wait, "RPC call failed; trying again");
+                        tracing::warn!(%error, ?wait, "RPC call failed; trying again");
                         tokio::time::sleep(*wait).await;
                     }
                     _ => return Err(error),

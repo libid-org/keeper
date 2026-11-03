@@ -15,10 +15,7 @@ use alloy::providers::{
 };
 use keeper::{
     logs::Logs,
-    rpc::{
-        Retry,
-        RpcUrl,
-    },
+    rpc::RpcUrl,
 };
 use tracing_subscriber::{
     util::SubscriberInitExt,
@@ -65,8 +62,7 @@ async fn trace_logs_name_no_endpoint() {
     .init();
     tracing::trace!("logging at trace");
     let url: RpcUrl = format!("http://127.0.0.1:1/v2/{KEY}").parse().unwrap();
-    let provider: RootProvider =
-        RootProvider::new(url.client(PATIENCE, Retry::READS).unwrap());
+    let provider: RootProvider = RootProvider::new(url.client(PATIENCE).unwrap());
     provider.get_block_number().await.unwrap_err();
     let log = log.text();
     assert!(log.contains("logging at trace"), "{log}");

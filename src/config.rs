@@ -35,10 +35,7 @@ use anyhow::{
 use serde::Deserialize;
 use toml::de;
 
-use crate::rpc::{
-    Retry,
-    RpcUrl,
-};
+use crate::rpc::RpcUrl;
 
 /// Default RPC timeout: a node answers a read in well under a second, so a
 /// call still unanswered after half a minute is stuck.
@@ -291,16 +288,9 @@ impl NetworkEntry {
 }
 
 impl ResolvedNetwork {
-    /// A client for this network's endpoint, bounded by its `rpc_timeout`,
-    /// that sends a read again after a transient error.
+    /// A client for this network's endpoint, bounded by its `rpc_timeout`.
     pub fn client(&self) -> reqwest::Result<RpcClient> {
-        self.rpc_url.client(self.rpc_timeout, Retry::READS)
-    }
-
-    /// A client for this network's endpoint, bounded by its `rpc_timeout`,
-    /// that sends every call once: the one a transaction goes through.
-    pub fn sending_client(&self) -> reqwest::Result<RpcClient> {
-        self.rpc_url.client(self.rpc_timeout, Retry::NONE)
+        self.rpc_url.client(self.rpc_timeout)
     }
 }
 
