@@ -68,5 +68,6 @@ async fn trace_logs_name_no_endpoint() {
     assert!(log.contains("logging at trace"), "{log}");
     assert!(log.contains("connecting to 127.0.0.1:1"), "{log}");
     assert!(log.contains("starting new connection"), "{log}");
+    assert!(log.contains("trying again"), "{log}");
     assert!(!log.contains(KEY), "{log}");
 }
