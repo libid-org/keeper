@@ -225,9 +225,15 @@ mod tests {
     };
 
     use alloy::{
+        primitives::U64,
         providers::{
             Provider,
             RootProvider,
+        },
+        rpc::json_rpc::{
+            Id,
+            Response,
+            ResponsePayload,
         },
         transports::TransportResult,
     };
@@ -265,16 +271,36 @@ mod tests {
     const UNAVAILABLE: &str = "HTTP/1.1 503 Service Unavailable\r\n\
         content-length: 18\r\nconnection: close\r\n\r\nserver unavailable";
 
-    /// Where an answer takes the id of the request it answers.
-    const REQUEST_ID: &str = "REQUEST_ID";
+    /// What the endpoint does with one request.
+    enum Answer {
+        /// Sends these bytes back.
+        Http(String),
+        /// Answers `eth_blockNumber` with this block.
+        Block(u64),
+        /// Keeps the connection open without an answer.
+        Silence,
+    }
 
-    /// The answer to `eth_blockNumber` naming block `number`, its body ending
-    /// where the connection does.
-    fn block(number: u64) -> String {
-        format!(
-            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nconnection: close\r\n\r\n\
-             {{\"jsonrpc\":\"2.0\",\"id\":{REQUEST_ID},\"result\":\"{number:#x}\"}}"
-        )
+    impl Answer {
+        /// The bytes that answer the request with JSON-RPC id `id`, if any.
+        fn to_http(&self, id: u64) -> Option<String> {
+            match self {
+                Self::Http(answer) => Some(answer.clone()),
+                Self::Block(number) => {
+                    let body = serde_json::to_string(&Response {
+                        id: Id::Number(id),
+                        payload: ResponsePayload::<U64, ()>::Success(U64::from(*number)),
+                    })
+                    .unwrap();
+                    Some(format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                         content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    ))
+                }
+                Self::Silence => None,
+            }
+        }
     }
 
     /// The part of a JSON-RPC request an answer echoes.
@@ -283,12 +309,11 @@ mod tests {
         id: u64,
     }
 
-    /// An endpoint that reads each request and sends back the next of its
-    /// answers, the last one again for every later request. `None` keeps the
-    /// connection open without an answer.
+    /// An endpoint that reads each request and gives it the next of its
+    /// answers, the last one again for every later request.
     struct Endpoint {
         listener: TcpListener,
-        answers: Vec<Option<String>>,
+        answers: Vec<Answer>,
         requests: Arc<AtomicUsize>,
     }
 
@@ -296,7 +321,8 @@ mod tests {
         /// The error a call gets, sent once, from an endpoint that answers
         /// `answer`.
         async fn error_for(answer: String) -> TransportError {
-            let (block, _) = Self::call(vec![Some(answer)], PATIENCE, Retry::NONE).await;
+            let (block, _) =
+                Self::call(vec![Answer::Http(answer)], PATIENCE, Retry::NONE).await;
             block.unwrap_err()
         }
 
@@ -305,7 +331,7 @@ mod tests {
         /// sends it again as `retry` allows, and how many requests the
         /// endpoint read.
         async fn call(
-            answers: Vec<Option<String>>,
+            answers: Vec<Answer>,
             limit: Duration,
             retry: Retry,
         ) -> (TransportResult<u64>, usize) {
@@ -355,9 +381,7 @@ mod tests {
                 stream.read_exact(&mut body).await.unwrap();
                 let Request { id } = serde_json::from_slice(&body).unwrap();
                 let seen = self.requests.fetch_add(1, Ordering::SeqCst);
-                let answer = self.answers[seen.min(self.answers.len() - 1)]
-                    .as_ref()
-                    .map(|answer| answer.replace(REQUEST_ID, &id.to_string()));
+                let answer = self.answers[seen.min(self.answers.len() - 1)].to_http(id);
                 tokio::spawn(async move {
                     let Some(answer) = answer else {
                         // Holds the connection open until the test ends.
@@ -434,7 +458,8 @@ mod tests {
     #[tokio::test]
     async fn a_call_left_unanswered_fails_at_the_deadline() {
         let limit = Duration::from_millis(200);
-        let (block, requests) = Endpoint::call(vec![None], limit, Retry::NONE).await;
+        let (block, requests) =
+            Endpoint::call(vec![Answer::Silence], limit, Retry::NONE).await;
         let error = block.unwrap_err();
         let Some(TransportErrorKind::Custom(source)) = error.as_transport_err() else {
             panic!("expected the deadline's error, got {error:?}");
@@ -446,7 +471,7 @@ mod tests {
     /// The run of 06:17 on 2026-11-03: Eden answered one read with a 503.
     #[tokio::test]
     async fn a_read_answered_after_one_503_succeeds() {
-        let answers = vec![Some(UNAVAILABLE.to_owned()), Some(block(42))];
+        let answers = vec![Answer::Http(UNAVAILABLE.to_owned()), Answer::Block(42)];
         let (block, requests) = Endpoint::call(answers, PATIENCE, Retry::STANDARD).await;
         assert_eq!(block.unwrap(), 42);
         assert_eq!(requests, 2);
@@ -454,7 +479,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_read_that_keeps_getting_503_fails_with_the_last_503() {
-        let answers = vec![Some(UNAVAILABLE.to_owned())];
+        let answers = vec![Answer::Http(UNAVAILABLE.to_owned())];
         let (block, requests) = Endpoint::call(answers, PATIENCE, Retry::STANDARD).await;
         let error = block.unwrap_err();
         let Some(TransportErrorKind::HttpError(HttpError { status, body })) =
@@ -468,9 +493,12 @@ mod tests {
 
     #[tokio::test]
     async fn a_read_refused_for_what_it_asks_is_sent_once() {
-        let (block, requests) =
-            Endpoint::call(vec![Some(REDIRECT.to_owned())], PATIENCE, Retry::STANDARD)
-                .await;
+        let (block, requests) = Endpoint::call(
+            vec![Answer::Http(REDIRECT.to_owned())],
+            PATIENCE,
+            Retry::STANDARD,
+        )
+        .await;
         let error = block.unwrap_err();
         let Some(TransportErrorKind::HttpError(HttpError { status, .. })) =
             error.as_transport_err()
@@ -486,7 +514,8 @@ mod tests {
     #[tokio::test]
     async fn an_unanswered_read_is_sent_again_once() {
         let limit = Duration::from_millis(200);
-        let (block, requests) = Endpoint::call(vec![None], limit, Retry::STANDARD).await;
+        let (block, requests) =
+            Endpoint::call(vec![Answer::Silence], limit, Retry::STANDARD).await;
         let error = block.unwrap_err();
         let Some(TransportErrorKind::Custom(source)) = error.as_transport_err() else {
             panic!("expected the deadline's error, got {error:?}");
@@ -502,9 +531,9 @@ mod tests {
         let endpoint = Endpoint {
             listener: TcpListener::bind("127.0.0.1:0").await.unwrap(),
             answers: vec![
-                Some(UNAVAILABLE.to_owned()),
-                Some(UNAVAILABLE.to_owned()),
-                Some(block(42)),
+                Answer::Http(UNAVAILABLE.to_owned()),
+                Answer::Http(UNAVAILABLE.to_owned()),
+                Answer::Block(42),
             ],
             requests: Arc::default(),
         };
