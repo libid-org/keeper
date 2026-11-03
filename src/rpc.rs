@@ -454,7 +454,7 @@ mod tests {
             panic!("expected the endpoint's 503, got {error:?}");
         };
         assert_eq!((*status, body.as_str()), (503, "server unavailable"));
-        assert_eq!(requests, 4);
+        assert_eq!(requests, 6);
     }
 
     #[tokio::test]

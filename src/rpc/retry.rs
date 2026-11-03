@@ -58,14 +58,16 @@ enum Transient {
 }
 
 impl Retry {
-    /// For calls that are safe to send twice: three more tries, 0.2 s, 0.4 s
-    /// and 0.8 s apart. An endpoint still failing after them is down for the
-    /// tick.
+    /// For calls that are safe to send twice: five more tries, 0.2 s to 3.2 s
+    /// apart, about 6 s in all. Eden's 503 outages over 72 h of mainnet lasted
+    /// up to 3.5 s; an endpoint still failing after them is down for the tick.
     pub const READS: Self = Self {
         backoff: &[
             Duration::from_millis(200),
             Duration::from_millis(400),
             Duration::from_millis(800),
+            Duration::from_millis(1600),
+            Duration::from_millis(3200),
         ],
     };
 
