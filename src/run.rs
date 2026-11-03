@@ -240,7 +240,7 @@ async fn submit_to(network: &ResolvedNetwork, calldata: Vec<u8>) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("gas signer build: {e}"))?;
     let provider = ProviderBuilder::new()
         .wallet(wallet)
-        .connect_client(network.client()?);
+        .connect_client(network.sending_client()?);
     tracing::info!(
         network = %network.name,
         contract = %network.google_jwt_roots,

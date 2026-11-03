@@ -3,9 +3,13 @@
 //! up in the logs, so neither the endpoint's `Debug` nor an error from its
 //! client names more than the host; [`Logs`](crate::logs::Logs) keeps alloy's
 //! transport span, which names the whole URL, out of the logs. Each call
-//! fails once its endpoint leaves it unanswered past the configured limit.
+//! fails once its endpoint leaves it unanswered past the configured limit, and
+//! is sent again a few times after an error a moment's outage explains.
 
 mod deadline;
+mod retry;
+
+pub use self::retry::Retry;
 
 use std::{
     fmt,
@@ -67,15 +71,17 @@ pub enum RpcUrlError {
 
 impl RpcUrl {
     /// A client for this endpoint whose errors never name it, each call and
-    /// each connect failing once unanswered for `limit`. It follows no
+    /// each connect failing once unanswered for `limit` and sent again after
+    /// a transient error as `retry` allows. It follows no
     /// redirect: the error of a redirected request names the URL the server
     /// picked.
-    pub fn client(&self, limit: Duration) -> reqwest::Result<RpcClient> {
+    pub fn client(&self, limit: Duration, retry: Retry) -> reqwest::Result<RpcClient> {
         let http = reqwest::Client::builder()
             .redirect(Policy::none())
             .connect_timeout(limit)
             .build()?;
         Ok(ClientBuilder::default()
+            .layer(retry)
             .layer(Redact(self.clone()))
             .layer(Deadline(limit))
             .http_with_client(http, self.0.clone()))
@@ -205,9 +211,20 @@ where
 
 #[cfg(test)]
 mod tests {
-    use alloy::providers::{
-        Provider,
-        RootProvider,
+    use std::sync::{
+        atomic::{
+            AtomicUsize,
+            Ordering,
+        },
+        Arc,
+    };
+
+    use alloy::{
+        providers::{
+            Provider,
+            RootProvider,
+        },
+        transports::TransportResult,
     };
     use tokio::{
         io::{
@@ -216,7 +233,10 @@ mod tests {
             AsyncWriteExt,
             BufReader,
         },
-        net::TcpListener,
+        net::{
+            TcpListener,
+            TcpStream,
+        },
     };
 
     use super::{
@@ -239,56 +259,111 @@ mod tests {
     const REDIRECT: &str = "HTTP/1.1 307 Temporary Redirect\r\n\
         location: /v3/other-key\r\ncontent-length: 0\r\n\r\n";
 
-    /// An endpoint that reads one request and sends a fixed answer back.
-    struct OneAnswer(TcpListener);
+    /// A 503 with the body Eden's endpoint sent.
+    const UNAVAILABLE: &str = "HTTP/1.1 503 Service Unavailable\r\n\
+        content-length: 18\r\nconnection: close\r\n\r\nserver unavailable";
 
-    impl OneAnswer {
-        /// The error a call gets from an endpoint that answers `answer`.
+    /// The answer to `eth_blockNumber` naming block `number`.
+    fn block(number: u64) -> String {
+        let body = format!(r#"{{"jsonrpc":"2.0","id":0,"result":"{number:#x}"}}"#);
+        format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+             content-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    /// An endpoint that reads each request and sends back the next of its
+    /// answers, the last one again for every later request. `None` keeps the
+    /// connection open without an answer.
+    struct Endpoint {
+        listener: TcpListener,
+        answers: Vec<Option<String>>,
+        requests: Arc<AtomicUsize>,
+    }
+
+    impl Endpoint {
+        /// The error a call gets, sent once, from an endpoint that answers
+        /// `answer`.
         async fn error_for(answer: String) -> TransportError {
-            let endpoint = Self(TcpListener::bind("127.0.0.1:0").await.unwrap());
+            let (block, _) = Self::call(vec![Some(answer)], PATIENCE, Retry::NONE).await;
+            block.unwrap_err()
+        }
+
+        /// What `eth_blockNumber` gets from an endpoint that answers
+        /// `answers`, through a client that waits `limit` for each call and
+        /// sends it again as `retry` allows, and how many requests the
+        /// endpoint read.
+        async fn call(
+            answers: Vec<Option<String>>,
+            limit: Duration,
+            retry: Retry,
+        ) -> (TransportResult<u64>, usize) {
+            let endpoint = Self {
+                listener: TcpListener::bind("127.0.0.1:0").await.unwrap(),
+                answers,
+                requests: Arc::default(),
+            };
             let provider: RootProvider =
-                RootProvider::new(endpoint.rpc_url().client(PATIENCE).unwrap());
-            let server = tokio::spawn(endpoint.send(answer));
-            let error = provider.get_block_number().await.unwrap_err();
-            server.await.unwrap();
-            error
+                RootProvider::new(endpoint.rpc_url().client(limit, retry).unwrap());
+            let requests = endpoint.requests.clone();
+            let server = tokio::spawn(endpoint.serve());
+            let block = tokio::time::timeout(PATIENCE, provider.get_block_number())
+                .await
+                .expect("the call ended within its tries");
+            server.abort();
+            (block, requests.load(Ordering::SeqCst))
         }
 
         /// The endpoint's URL, holding [`KEY`] in its path and [`TOKEN`] in its
         /// query, the way hosted nodes hold their API keys.
         fn rpc_url(&self) -> RpcUrl {
-            let address = self.0.local_addr().unwrap();
+            let address = self.listener.local_addr().unwrap();
             format!("http://{address}/v2/{KEY}?token={TOKEN}")
                 .parse()
                 .unwrap()
         }
 
-        async fn send(self, answer: String) {
-            let (stream, _) = self.0.accept().await.unwrap();
-            let mut stream = BufReader::new(stream);
-            let mut length = 0;
+        async fn serve(self) {
             loop {
-                let mut line = String::new();
-                let read = stream.read_line(&mut line).await.unwrap();
-                if read == 0 || line == "\r\n" {
-                    break;
-                }
-                if let Some((name, value)) = line.split_once(':') {
-                    if name.eq_ignore_ascii_case("content-length") {
-                        length = value.trim().parse().unwrap();
-                    }
+                let (stream, _) = self.listener.accept().await.unwrap();
+                let mut stream = BufReader::new(stream);
+                read_request(&mut stream).await;
+                let seen = self.requests.fetch_add(1, Ordering::SeqCst);
+                let answer = self.answers[seen.min(self.answers.len() - 1)].clone();
+                tokio::spawn(async move {
+                    let Some(answer) = answer else {
+                        // Holds the connection open until the test ends.
+                        return std::future::pending().await;
+                    };
+                    stream.write_all(answer.as_bytes()).await.unwrap();
+                    stream.shutdown().await.unwrap();
+                });
+            }
+        }
+    }
+
+    async fn read_request(stream: &mut BufReader<TcpStream>) {
+        let mut length = 0;
+        loop {
+            let mut line = String::new();
+            let read = stream.read_line(&mut line).await.unwrap();
+            if read == 0 || line == "\r\n" {
+                break;
+            }
+            if let Some((name, value)) = line.split_once(':') {
+                if name.eq_ignore_ascii_case("content-length") {
+                    length = value.trim().parse().unwrap();
                 }
             }
-            let mut body = vec![0; length];
-            stream.read_exact(&mut body).await.unwrap();
-            stream.write_all(answer.as_bytes()).await.unwrap();
-            stream.shutdown().await.unwrap();
         }
+        let mut body = vec![0; length];
+        stream.read_exact(&mut body).await.unwrap();
     }
 
     #[tokio::test]
     async fn a_cut_off_error_body_names_no_endpoint() {
-        let error = OneAnswer::error_for(CUT_OFF.to_owned()).await;
+        let error = Endpoint::error_for(CUT_OFF.to_owned()).await;
         let Some(TransportErrorKind::HttpError(HttpError { status, body })) =
             error.as_transport_err()
         else {
@@ -303,7 +378,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_error_body_that_echoes_the_path_names_no_endpoint() {
-        let error = OneAnswer::error_for(format!(
+        let error = Endpoint::error_for(format!(
             "HTTP/1.1 429 Too Many Requests\r\nretry-after: 1\r\nconnection: close\r\n\r\n\
              no capacity left for POST /v2/{KEY}?token={TOKEN}"
         ))
@@ -324,7 +399,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_body_that_is_no_json_names_no_endpoint() {
-        let error = OneAnswer::error_for(format!(
+        let error = Endpoint::error_for(format!(
             "HTTP/1.1 200 OK\r\nconnection: close\r\n\r\nCannot POST /v2/{KEY}"
         ))
         .await;
@@ -336,7 +411,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_redirect_is_not_followed() {
-        let error = OneAnswer::error_for(REDIRECT.to_owned()).await;
+        let error = Endpoint::error_for(REDIRECT.to_owned()).await;
         let Some(TransportErrorKind::HttpError(HttpError { status, .. })) =
             error.as_transport_err()
         else {
@@ -345,25 +420,77 @@ mod tests {
         assert_eq!(*status, 307);
     }
 
-    /// An endpoint whose port takes the connection but never answers fails
-    /// the call at its limit.
+    /// An endpoint that takes the request but never answers fails the call
+    /// at its limit.
     #[tokio::test]
     async fn a_call_left_unanswered_fails_at_the_deadline() {
-        let silent = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let rpc_url: RpcUrl = format!("http://{}", silent.local_addr().unwrap())
-            .parse()
-            .unwrap();
         let limit = Duration::from_millis(200);
-        let provider: RootProvider = RootProvider::new(rpc_url.client(limit).unwrap());
-        let error = tokio::time::timeout(PATIENCE, provider.get_block_number())
-            .await
-            .expect("the call gave up at its deadline")
-            .unwrap_err();
+        let (block, requests) = Endpoint::call(vec![None], limit, Retry::NONE).await;
+        let error = block.unwrap_err();
         let Some(TransportErrorKind::Custom(source)) = error.as_transport_err() else {
             panic!("expected the deadline's error, got {error:?}");
         };
         assert_eq!(source.downcast_ref(), Some(&Unanswered(limit)));
-        drop(silent);
+        assert_eq!(requests, 1);
+    }
+
+    /// The run of 06:17 on 2026-11-03: Eden answered one read with a 503.
+    #[tokio::test]
+    async fn a_read_answered_after_one_503_succeeds() {
+        let answers = vec![Some(UNAVAILABLE.to_owned()), Some(block(42))];
+        let (block, requests) = Endpoint::call(answers, PATIENCE, Retry::READS).await;
+        assert_eq!(block.unwrap(), 42);
+        assert_eq!(requests, 2);
+    }
+
+    #[tokio::test]
+    async fn a_read_that_keeps_getting_503_fails_with_the_last_503() {
+        let answers = vec![Some(UNAVAILABLE.to_owned())];
+        let (block, requests) = Endpoint::call(answers, PATIENCE, Retry::READS).await;
+        let error = block.unwrap_err();
+        let Some(TransportErrorKind::HttpError(HttpError { status, body })) =
+            error.as_transport_err()
+        else {
+            panic!("expected the endpoint's 503, got {error:?}");
+        };
+        assert_eq!((*status, body.as_str()), (503, "server unavailable"));
+        assert_eq!(requests, 4);
+    }
+
+    #[tokio::test]
+    async fn a_read_refused_for_what_it_asks_is_sent_once() {
+        let (block, requests) =
+            Endpoint::call(vec![Some(REDIRECT.to_owned())], PATIENCE, Retry::READS).await;
+        let error = block.unwrap_err();
+        let Some(TransportErrorKind::HttpError(HttpError { status, .. })) =
+            error.as_transport_err()
+        else {
+            panic!("expected an HTTP error, got {error:?}");
+        };
+        assert_eq!(*status, 307);
+        assert_eq!(requests, 1);
+    }
+
+    /// Each unanswered try costs the whole deadline, so a dead endpoint gets
+    /// one more try, not three.
+    #[tokio::test]
+    async fn an_unanswered_read_is_sent_again_once() {
+        let limit = Duration::from_millis(200);
+        let (block, requests) = Endpoint::call(vec![None], limit, Retry::READS).await;
+        let error = block.unwrap_err();
+        let Some(TransportErrorKind::Custom(source)) = error.as_transport_err() else {
+            panic!("expected the deadline's error, got {error:?}");
+        };
+        assert_eq!(source.downcast_ref(), Some(&Unanswered(limit)));
+        assert_eq!(requests, 2);
+    }
+
+    #[tokio::test]
+    async fn a_call_sent_once_is_not_sent_again_after_a_503() {
+        let answers = vec![Some(UNAVAILABLE.to_owned()), Some(block(42))];
+        let (block, requests) = Endpoint::call(answers, PATIENCE, Retry::NONE).await;
+        assert!(block.is_err(), "{block:?}");
+        assert_eq!(requests, 1);
     }
 
     #[test]
