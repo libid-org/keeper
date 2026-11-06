@@ -40,7 +40,8 @@ struct Jwks {
 /// carry no `n`.
 #[derive(Debug, Deserialize)]
 struct Jwk {
-    kid: String,
+    #[serde(default)]
+    kid: Option<String>,
     #[serde(default)]
     kty: Option<String>,
     #[serde(default)]
@@ -48,7 +49,9 @@ struct Jwk {
 }
 
 /// Parse a JWKS response body into [`JwksKey`]s. A key whose `kty` is
-/// present and not `RSA` is skipped, as the contract skips it.
+/// present and not `RSA` is skipped unread, as the contract skips it; an RSA
+/// key without `kid` or `n` fails the parse, as it fails the contract's
+/// reading.
 pub fn parse_jwks(body: &[u8]) -> Result<Vec<JwksKey>> {
     let jwks: Jwks = serde_json::from_slice(body).context("parsing JWKS JSON")?;
     if jwks.keys.is_empty() {
@@ -65,17 +68,16 @@ pub fn parse_jwks(body: &[u8]) -> Result<Vec<JwksKey>> {
         if jwk.kty.as_deref().is_some_and(|kty| kty != "RSA") {
             continue;
         }
-        let Some(n) = &jwk.n else {
-            tracing::warn!(kid = %jwk.kid, "ignoring an RSA key with no modulus");
-            continue;
+        let (Some(kid), Some(n)) = (&jwk.kid, &jwk.n) else {
+            bail!("the JWKS response has an RSA key without `kid` or `n`");
         };
         match modulus_hash(n) {
             Ok(modulus_hash) => keys.push(JwksKey {
-                kid: jwk.kid.clone(),
+                kid: kid.clone(),
                 modulus_hash,
             }),
             Err(e) => {
-                tracing::warn!(kid = %jwk.kid, error = format_args!("{e:#}"), "ignoring a key the contract would refuse")
+                tracing::warn!(kid = %kid, error = format_args!("{e:#}"), "ignoring a key the contract would refuse")
             }
         }
     }
@@ -250,6 +252,26 @@ mod tests {
         let keys = parse_jwks(body.as_bytes()).unwrap();
         assert_eq!(keys.len(), 1);
         assert_eq!(keys[0].kid, "k2");
+    }
+
+    /// The contract skips a non-RSA key unread, `kid` or not, and refuses
+    /// the whole reading over an RSA key it cannot read.
+    #[test]
+    fn parse_jwks_needs_kid_and_n_on_rsa_keys_only() {
+        let rsa = format!(
+            r#"{{"kty":"RSA","kid":"k1","n":"{}","e":"AQAB"}}"#,
+            modulus(5)
+        );
+        let body =
+            format!(r#"{{"keys":[{{"kty":"OKP","crv":"Ed25519","x":"AA"}},{rsa}]}}"#);
+        assert_eq!(parse_jwks(body.as_bytes()).unwrap().len(), 1);
+        for broken in [
+            r#"{"kty":"RSA","kid":"k2","e":"AQAB"}"#,
+            r#"{"kty":"RSA","n":"AQAB","e":"AQAB"}"#,
+        ] {
+            let body = format!(r#"{{"keys":[{rsa},{broken}]}}"#);
+            assert!(parse_jwks(body.as_bytes()).is_err(), "{broken}");
+        }
     }
 
     #[test]

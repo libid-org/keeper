@@ -10,7 +10,7 @@ and `telegram_jwt_roots`, inline or in its chain-configurations file's
 
 Telegram compresses some JWKS replies even when the request asks for none,
 and the contract refuses an encoded reply. The keeper ends such a session
-before the notary signs and reads again, up to ten times.
+before the notary signs and reads again, a bounded number of times.
 
 Configuration is one `keeper.toml`; the container image and how to run it
 are described in `Dockerfile`.

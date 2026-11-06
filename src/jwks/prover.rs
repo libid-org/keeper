@@ -1,11 +1,6 @@
 //! Prover-side helpers for obtaining a [`NotarizedSession`] of the JWKS reading
 //! from a running notary -- the pieces the keeper consumes.
 
-use std::sync::atomic::{
-    AtomicBool,
-    Ordering,
-};
-
 use libid_tlsn::ProverResult;
 use libid_transcript::read_msg;
 use tokio::io::{
@@ -43,13 +38,13 @@ where
     T: AsyncWrite + AsyncRead + Send + Unpin + 'static,
 {
     let request = jwks::request(issuer, USER_AGENT)?;
-    let encoded = AtomicBool::new(false);
+    let mut encoded = false;
     let result = libid_tlsn::prover_generic(
         socket,
         request,
         |sent, recv| {
             jwks::layout(sent, recv).ok_or_else(|| {
-                encoded.store(true, Ordering::Relaxed);
+                encoded = true;
                 libid_tlsn::Error::MpcTlsFailed {
                     detail: "the reply carries a Content-Encoding".into(),
                 }
@@ -61,7 +56,7 @@ where
     )
     .await;
     match result {
-        Err(_) if encoded.load(Ordering::Relaxed) => Err(Error::Encoded),
+        Err(_) if encoded => Err(Error::Encoded),
         result => Ok(result?),
     }
 }

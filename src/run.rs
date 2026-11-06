@@ -154,7 +154,7 @@ async fn tick_issuer(
     // ── decide ──────────────────────────────────────────────────────────────
     let mut needy: Vec<(&ResolvedNetwork, Address)> = Vec::new();
     for &(network, contract) in targets {
-        match read_network(config, network, contract, &live_keys).await {
+        match read_network(config, network, issuer, contract, &live_keys).await {
             Ok(reading) => {
                 outcome.contracts_read += 1;
                 if reading.needs_rotation() {
@@ -245,6 +245,7 @@ async fn tick_issuer(
 async fn read_network(
     config: &KeeperConfig,
     network: &ResolvedNetwork,
+    issuer: Issuer,
     contract: Address,
     live_keys: &[JwksKey],
 ) -> Result<RootsReading> {
@@ -252,6 +253,7 @@ async fn read_network(
     let now = chain::chain_now(&provider).await?;
     chain::read_roots(
         &provider,
+        issuer,
         contract,
         live_keys,
         now,
@@ -324,7 +326,7 @@ pub async fn status(config: &KeeperConfig, networks: &[ResolvedNetwork]) -> Resu
             }
         };
         for (network, contract) in targets {
-            match read_network(config, network, contract, &live_keys).await {
+            match read_network(config, network, issuer, contract, &live_keys).await {
                 Ok(reading) => {
                     for (kid, verdict) in &reading.keys {
                         let left = match verdict {
@@ -446,9 +448,15 @@ mod tests {
 
     #[tokio::test]
     async fn a_failed_read_names_no_endpoint() {
-        let error = read_network(&config(None), &network(None), Address::ZERO, &[])
-            .await
-            .unwrap_err();
+        let error = read_network(
+            &config(None),
+            &network(None),
+            Issuer::Google,
+            Address::ZERO,
+            &[],
+        )
+        .await
+        .unwrap_err();
         let message = format!("{error:#} {error:?}");
         assert!(message.contains("error sending request"), "{message}");
         assert!(!message.contains(KEY), "{message}");

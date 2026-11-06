@@ -23,6 +23,7 @@ use alloy::{
     eips::BlockNumberOrTag,
     network::TransactionBuilder,
     primitives::{
+        keccak256,
         Address,
         Bytes,
         TxHash,
@@ -40,10 +41,13 @@ use anyhow::{
 // `JwtRootsBase`'s ABI, which `TelegramJwtRoots` shares.
 use libid_contracts::bindings::ceremony::GoogleJwtRoots as JwtRoots;
 
-use crate::decision::{
-    key_verdict,
-    JwksKey,
-    KeyVerdict,
+use crate::{
+    decision::{
+        key_verdict,
+        JwksKey,
+        KeyVerdict,
+    },
+    jwks::Issuer,
 };
 
 /// The verdicts for one roots contract, one entry per live issuer key.
@@ -71,16 +75,30 @@ pub async fn chain_now<P: Provider>(provider: &P) -> Result<u64> {
     Ok(block.header.timestamp)
 }
 
-/// Read the trust state of the roots contract at `roots` for every live key
-/// of its issuer and classify it.
+/// Read the trust state of `issuer`'s roots contract at `roots` for every
+/// live key of the issuer and classify it. Fails when the contract pins
+/// another host: a reading of `issuer` would revert `WrongAuthority` there.
 pub async fn read_roots<P: Provider>(
     provider: &P,
+    issuer: Issuer,
     roots: Address,
     live_keys: &[JwksKey],
     now: u64,
     threshold: u64,
 ) -> Result<RootsReading> {
     let contract = JwtRoots::new(roots, provider);
+    let authority = contract
+        .AUTHORITY()
+        .call()
+        .await
+        .context("AUTHORITY() failed")?;
+    if authority != keccak256(issuer.host()) {
+        bail!(
+            "{roots} is not {}'s roots contract: it pins another host than {}",
+            issuer.name(),
+            issuer.host()
+        );
+    }
     let mut keys = Vec::with_capacity(live_keys.len());
     for key in live_keys {
         let expiry = contract
