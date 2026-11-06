@@ -1,11 +1,15 @@
-//! Obtaining a [`NotarizedSession`] — the notarized reading of Google's JWKS:
+//! Obtaining a [`NotarizedSession`] — the notarized reading of an issuer's JWKS:
 //! an MPC-TLS session against a running libid notary's TCP wire port, driven
 //! by this crate's own prover-side helpers
 //! ([`crate::jwks::prover::notarize_jwks`]). What comes back is the
 //! platform-ceremonies section 4.1 bytes and the notary's signature over
-//! them — exactly what `GoogleJwtRoots.rotate` takes.
+//! them — exactly what the roots contract's `rotate` takes.
 
-use crate::jwks::NotarizedSession;
+use crate::jwks::{
+    self,
+    Issuer,
+    NotarizedSession,
+};
 use anyhow::{
     bail,
     Context,
@@ -14,6 +18,11 @@ use anyhow::{
 use tokio::net::TcpStream;
 
 use crate::config::KeeperConfig;
+
+/// Sessions to try per reading while the reply comes back encoded, which
+/// Telegram does for some requests even unasked. A reading still encoded
+/// after these is left to the next tick.
+const ATTEMPTS: usize = 10;
 
 /// Where notarized readings come from.
 #[derive(Debug, Clone)]
@@ -41,24 +50,38 @@ impl ProofSource {
         );
     }
 
-    /// Obtain one notarized reading of Google's JWKS.
-    pub async fn obtain(&self) -> Result<NotarizedSession> {
-        match self {
-            Self::Notary(addr) => {
-                tracing::info!(notary = %addr, "starting MPC-TLS JWKS notarization");
-                let socket = TcpStream::connect(addr)
-                    .await
-                    .with_context(|| format!("connecting to notary at {addr}"))?;
-                let session = crate::jwks::prover::notarize_jwks(socket)
-                    .await
-                    .context("MPC-TLS JWKS notarization failed")?;
-                tracing::info!(
-                    attested_bytes = session.attested_data.len(),
-                    "notary signed the JWKS reading"
-                );
-                Ok(session)
+    /// Obtain one notarized reading of `issuer`'s JWKS, in a new session
+    /// while the issuer's reply comes back encoded.
+    pub async fn obtain(&self, issuer: Issuer) -> Result<NotarizedSession> {
+        let Self::Notary(addr) = self;
+        for attempt in 1..=ATTEMPTS {
+            tracing::info!(notary = %addr, issuer = issuer.name(), attempt, "starting MPC-TLS JWKS notarization");
+            let socket = TcpStream::connect(addr)
+                .await
+                .with_context(|| format!("connecting to notary at {addr}"))?;
+            match crate::jwks::prover::notarize_jwks(issuer, socket).await {
+                Ok(session) => {
+                    tracing::info!(
+                        issuer = issuer.name(),
+                        attested_bytes = session.attested_data.len(),
+                        "notary signed the JWKS reading"
+                    );
+                    return Ok(session);
+                }
+                Err(jwks::Error::Encoded) => {
+                    tracing::warn!(
+                        issuer = issuer.name(),
+                        attempt,
+                        "reply was encoded, reading again"
+                    );
+                }
+                Err(e) => return Err(e).context("MPC-TLS JWKS notarization failed"),
             }
         }
+        bail!(
+            "{} replied encoded {ATTEMPTS} times in a row",
+            issuer.name()
+        )
     }
 }
 

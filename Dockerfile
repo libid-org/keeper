@@ -1,4 +1,4 @@
-# Production image for the libID JWKS keeper: polls Google, notarizes via
+# Production image for the libID JWKS keeper: polls Google and Telegram, notarizes via
 # MPC-TLS, rotates on-chain roots.
 #
 # The whole runtime contract is one file, mounted read-only where
@@ -54,7 +54,7 @@ RUN cargo build --locked --release
 # === Runtime ===
 FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171
 
-# ca-certificates: outbound TLS to Google, to every configured RPC, and to AWS
+# ca-certificates: outbound TLS to Google and Telegram, to every configured RPC, and to AWS
 # KMS when a signer is a key id. libssl3 is deliberately not named: nothing
 # links it — `ldd` on the binary lists libc, libm and libgcc_s only.
 # ca-certificates still pulls it in through openssl, so dropping the explicit
@@ -82,7 +82,7 @@ ENV KEEPER_CONFIG=/etc/keeper/keeper.toml
 
 # Links the ghcr package to this repo and records what the image came from.
 LABEL org.opencontainers.image.source="https://github.com/libid-org/keeper" \
-      org.opencontainers.image.description="libID JWKS keeper: notarized readings of Google's JWKS, rotated into GoogleJwtRoots on every configured chain." \
+      org.opencontainers.image.description="libID JWKS keeper: notarized readings of Google's and Telegram's JWKS, rotated into their roots contracts on every configured chain." \
       org.opencontainers.image.licenses="MIT OR Apache-2.0"
 
 ENTRYPOINT ["keeper"]
