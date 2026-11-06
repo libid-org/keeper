@@ -32,7 +32,7 @@ libid-crypto = "0.7"
 libid-signer = "0.7"
 # The JWKS prover runs the MPC-TLS session itself (libid-tlsn, git-only), and
 # states its layout and reads the frame back (libid-transcript).
-libid-tlsn = { git = "https://github.com/libid-org/libID-rs", tag = "v0.7.0" }
+libid-tlsn = { git = "https://github.com/libid-org/libID-rs", rev = "7334b569cabc3c7732d54d96222d21071fed716c" }
 libid-transcript = "0.7"
 
 # ── contract bindings + deploy helpers ──────────────────────────────────────
