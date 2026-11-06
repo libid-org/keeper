@@ -28,12 +28,12 @@ path = "src/main.rs"
 # libid-transcript's `AttestationWire`, the frame both sides read and write,
 # and both sides run the tlsn pin libid-tlsn carries. Moves with the notary's
 # pin, never on its own.
-libid-crypto = "0.7"
-libid-signer = "0.7"
+libid-crypto = "0.8"
+libid-signer = "0.8"
 # The JWKS prover runs the MPC-TLS session itself (libid-tlsn, git-only), and
 # states its layout and reads the frame back (libid-transcript).
-libid-tlsn = { git = "https://github.com/libid-org/libID-rs", rev = "7334b569cabc3c7732d54d96222d21071fed716c" }
-libid-transcript = "0.7"
+libid-tlsn = { git = "https://github.com/libid-org/libID-rs", tag = "v0.8.0" }
+libid-transcript = "0.8"
 
 # ── contract bindings + deploy helpers ──────────────────────────────────────
 # The registry crate is fine here: it has no tlsn-adjacent types. Its
@@ -95,4 +95,4 @@ tempfile = "3"
 # the keeper takes, so the prover and the keeper share one `Layout` and one
 # `AttestationWire`.
 [patch."https://github.com/libid-org/libID-rs"]
-libid-transcript = "0.7"
+libid-transcript = "0.8"
