@@ -9,6 +9,7 @@ use std::{
 
 use keeper::{
     config::KeeperConfig,
+    jwks::Issuer,
     rpc::RpcUrl,
 };
 
@@ -89,8 +90,44 @@ fn network_file_reads_both_spellings_of_the_roots_address() {
         assert_eq!(networks[0].name, "local-dev", "{era}");
         assert_eq!(
             networks[0].google_jwt_roots,
-            ADDRESS.parse::<alloy::primitives::Address>().unwrap(),
+            Some(ADDRESS.parse::<alloy::primitives::Address>().unwrap()),
             "{era}"
+        );
+    }
+}
+
+/// A network with only Telegram's roots resolves, from a network file's
+/// `[contracts]` and inline alike, and names no Google contract.
+#[test]
+fn telegram_roots_alone_resolve_from_a_file_and_inline() {
+    const ADDRESS: &str = "0x69cc7c69b39ada71ce908d432868d5ef9a6a6d0e";
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("local-dev.toml"),
+        format!(
+            "[network]\nname = \"local-dev\"\nrpc_url = \"http://127.0.0.1:8545\"\n\n\
+             [contracts]\ntelegram_jwt_roots = \"{ADDRESS}\"\n"
+        ),
+    )
+    .unwrap();
+    let entries = [
+        "network_file = \"local-dev.toml\"".to_string(),
+        format!(
+            "name = \"inline\"\nrpc_url = \"http://127.0.0.1:8545\"\n\
+             telegram_jwt_roots = \"{ADDRESS}\""
+        ),
+    ];
+
+    for entry in entries {
+        let path = write_keeper_toml(dir.path(), &format!("[[networks]]\n{entry}\n"));
+        let (_, networks) =
+            KeeperConfig::load(&path).unwrap_or_else(|e| panic!("{entry}: {e:#}"));
+        let network = &networks[0];
+        assert_eq!(network.google_jwt_roots, None, "{entry}");
+        assert_eq!(
+            network.roots(Issuer::Telegram),
+            Some(ADDRESS.parse().unwrap()),
+            "{entry}"
         );
     }
 }
@@ -377,12 +414,14 @@ fn entry_rpc_url_wins_over_the_network_files_endpoint() {
 }
 
 /// The file stays the source of truth for the network's name and its
-/// contract: an entry that states either beside `network_file` is refused.
+/// contracts: an entry that states any of them beside `network_file` is
+/// refused.
 #[test]
-fn network_file_entry_refuses_name_and_google_jwt_roots() {
+fn network_file_entry_refuses_name_and_roots_addresses() {
     let fields = [
         "name = \"other\"",
         "google_jwt_roots = \"0x69cc7c69b39ada71ce908d432868d5ef9a6a6d0e\"",
+        "telegram_jwt_roots = \"0x69cc7c69b39ada71ce908d432868d5ef9a6a6d0e\"",
     ];
 
     for field in fields {

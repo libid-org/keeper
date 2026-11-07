@@ -1,7 +1,7 @@
 //! The needs-rotation decision, as pure functions over plain data.
 //!
 //! The chain is read elsewhere ([`crate::chain`]); this module turns "what
-//! Google publishes" plus "what the contract trusts until when" into a
+//! the issuer publishes" plus "what the contract trusts until when" into a
 //! verdict, so the logic is unit-testable without a node.
 
 use alloy::primitives::B256;
@@ -18,12 +18,10 @@ use libid_crypto::keccak256;
 use num_bigint::BigUint;
 use serde::Deserialize;
 
-/// Google's JWKS endpoint — the same URL the notary attests.
-pub const GOOGLE_JWKS_URL: &str = "https://www.googleapis.com/oauth2/v3/certs";
-
-/// One key from Google's live JWKS, with the hash the contract keys trust by.
+/// One RSA key from an issuer's live JWKS, with the hash the contract keys
+/// trust by.
 #[derive(Debug, Clone)]
-pub struct GoogleKey {
+pub struct JwksKey {
     /// Key id, as published. For logs and the status table; the contract
     /// keys nothing by it.
     pub kid: String,
@@ -32,45 +30,59 @@ pub struct GoogleKey {
     pub modulus_hash: B256,
 }
 
-/// Wire shape of `oauth2/v3/certs`, reduced to what the decision needs.
+/// Wire shape of a JWKS, reduced to what the decision needs.
 #[derive(Debug, Deserialize)]
 struct Jwks {
     keys: Vec<Jwk>,
 }
 
-/// One JWK entry.
+/// One JWK entry. Telegram lists EC and OKP keys beside its RSA one, which
+/// carry no `n`.
 #[derive(Debug, Deserialize)]
 struct Jwk {
-    kid: String,
-    n: String,
+    #[serde(default)]
+    kid: Option<String>,
+    #[serde(default)]
+    kty: Option<String>,
+    #[serde(default)]
+    n: Option<String>,
 }
 
-/// Parse a JWKS response body into [`GoogleKey`]s.
-pub fn parse_google_jwks(body: &[u8]) -> Result<Vec<GoogleKey>> {
+/// Parse a JWKS response body into [`JwksKey`]s. A key whose `kty` is
+/// present and not `RSA` is skipped unread, as the contract skips it; an RSA
+/// key without `kid` or `n` fails the parse, as it fails the contract's
+/// reading.
+pub fn parse_jwks(body: &[u8]) -> Result<Vec<JwksKey>> {
     let jwks: Jwks = serde_json::from_slice(body).context("parsing JWKS JSON")?;
     if jwks.keys.is_empty() {
-        bail!("Google's JWKS response contains no keys");
+        bail!("the JWKS response contains no keys");
     }
     // A key the contract would refuse is left out of the decision rather than
     // failing the tick: the contract installs only 2048-bit moduli
     // (`InvalidModulusLength` otherwise), so classifying such a key as
     // untrusted would make the keeper submit a rotation that reverts, every
-    // tick, until Google stopped publishing it. Skipping it keeps the live
-    // keys rotating; the warning says which key was ignored and why.
+    // tick, until the issuer stopped publishing it. Skipping it keeps the
+    // live keys rotating; the warning says which key was ignored and why.
     let mut keys = Vec::with_capacity(jwks.keys.len());
     for jwk in &jwks.keys {
-        match modulus_hash(&jwk.n) {
-            Ok(modulus_hash) => keys.push(GoogleKey {
-                kid: jwk.kid.clone(),
+        if jwk.kty.as_deref().is_some_and(|kty| kty != "RSA") {
+            continue;
+        }
+        let (Some(kid), Some(n)) = (&jwk.kid, &jwk.n) else {
+            bail!("the JWKS response has an RSA key without `kid` or `n`");
+        };
+        match modulus_hash(n) {
+            Ok(modulus_hash) => keys.push(JwksKey {
+                kid: kid.clone(),
                 modulus_hash,
             }),
             Err(e) => {
-                tracing::warn!(kid = %jwk.kid, error = format_args!("{e:#}"), "ignoring a key the contract would refuse")
+                tracing::warn!(kid = %kid, error = format_args!("{e:#}"), "ignoring a key the contract would refuse")
             }
         }
     }
     if keys.is_empty() {
-        bail!("Google's JWKS response contains no key the contract would accept");
+        bail!("the JWKS response contains no key the contract would accept");
     }
     Ok(keys)
 }
@@ -108,7 +120,7 @@ pub fn modulus_hash(n_b64url: &str) -> Result<B256> {
     Ok(B256::from(keccak256(&buf)))
 }
 
-/// The verdict for one Google-published key on one contract.
+/// The verdict for one issuer-published key on one contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyVerdict {
     /// The contract does not trust this key (never rotated in, or the kid
@@ -189,7 +201,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_google_jwks_extracts_every_key() {
+    fn parse_jwks_extracts_every_key() {
         let body = format!(
             r#"{{"keys":[
             {{"alg":"RS256","e":"AQAB","n":"{}","kty":"RSA","kid":"k1","use":"sig"}},
@@ -198,7 +210,7 @@ mod tests {
             modulus(3),
             modulus(89)
         );
-        let keys = parse_google_jwks(body.as_bytes()).unwrap();
+        let keys = parse_jwks(body.as_bytes()).unwrap();
         assert_eq!(keys.len(), 2);
         assert_eq!(keys[0].kid, "k1");
         assert_eq!(keys[1].kid, "k2");
@@ -209,17 +221,27 @@ mod tests {
     /// pretty-printed, two-space indent, LF newlines -- the shape the poll
     /// reads in production, not the compact form the other tests hand in.
     #[test]
-    fn parse_google_jwks_reads_the_body_google_serves() {
+    fn parse_jwks_reads_the_body_google_serves() {
         let body = include_bytes!("../tests/fixtures/certs.json");
-        let keys = parse_google_jwks(body).unwrap();
+        let keys = parse_jwks(body).unwrap();
         assert_eq!(keys.len(), 2, "Google published two keys that day");
+    }
+
+    /// Telegram's real body (fetched 2026-11-06): one RSA key beside an
+    /// ES256, an EdDSA and an ES256K key, which the contract skips.
+    #[test]
+    fn parse_jwks_keeps_only_telegrams_rsa_key() {
+        let body = include_bytes!("../tests/fixtures/telegram-jwks.json");
+        let keys = parse_jwks(body).unwrap();
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].kid, "oidc-1");
     }
 
     /// The contract refuses any modulus that is not 256 bytes, so a key of
     /// another size must not reach the decision: it is skipped, the others
     /// still rotate.
     #[test]
-    fn parse_google_jwks_skips_a_key_the_contract_would_refuse() {
+    fn parse_jwks_skips_a_key_the_contract_would_refuse() {
         let body = format!(
             r#"{{"keys":[
             {{"kid":"short","n":"AQAB","e":"AQAB"}},
@@ -227,14 +249,34 @@ mod tests {
         ]}}"#,
             modulus(7)
         );
-        let keys = parse_google_jwks(body.as_bytes()).unwrap();
+        let keys = parse_jwks(body.as_bytes()).unwrap();
         assert_eq!(keys.len(), 1);
         assert_eq!(keys[0].kid, "k2");
     }
 
+    /// The contract skips a non-RSA key unread, `kid` or not, and refuses
+    /// the whole reading over an RSA key it cannot read.
     #[test]
-    fn parse_google_jwks_rejects_a_set_with_no_acceptable_key() {
-        assert!(parse_google_jwks(br#"{"keys":[{"kid":"short","n":"AQAB"}]}"#).is_err());
+    fn parse_jwks_needs_kid_and_n_on_rsa_keys_only() {
+        let rsa = format!(
+            r#"{{"kty":"RSA","kid":"k1","n":"{}","e":"AQAB"}}"#,
+            modulus(5)
+        );
+        let body =
+            format!(r#"{{"keys":[{{"kty":"OKP","crv":"Ed25519","x":"AA"}},{rsa}]}}"#);
+        assert_eq!(parse_jwks(body.as_bytes()).unwrap().len(), 1);
+        for broken in [
+            r#"{"kty":"RSA","kid":"k2","e":"AQAB"}"#,
+            r#"{"kty":"RSA","n":"AQAB","e":"AQAB"}"#,
+        ] {
+            let body = format!(r#"{{"keys":[{rsa},{broken}]}}"#);
+            assert!(parse_jwks(body.as_bytes()).is_err(), "{broken}");
+        }
+    }
+
+    #[test]
+    fn parse_jwks_rejects_a_set_with_no_acceptable_key() {
+        assert!(parse_jwks(br#"{"keys":[{"kid":"short","n":"AQAB"}]}"#).is_err());
     }
 
     #[test]
@@ -244,8 +286,8 @@ mod tests {
     }
 
     #[test]
-    fn parse_google_jwks_rejects_empty_key_set() {
-        assert!(parse_google_jwks(br#"{"keys":[]}"#).is_err());
+    fn parse_jwks_rejects_empty_key_set() {
+        assert!(parse_jwks(br#"{"keys":[]}"#).is_err());
     }
 
     // ── the needs-rotation matrix ──────────────────────────────────────────
@@ -253,7 +295,7 @@ mod tests {
     const NOW: u64 = 1_700_000_000;
     const WEEK: u64 = 7 * 24 * 60 * 60;
 
-    /// New kid on Google, never rotated in: rotate.
+    /// New kid at the issuer, never rotated in: rotate.
     #[test]
     fn verdict_untrusted_when_chain_has_no_expiry() {
         let v = key_verdict(None, NOW, WEEK);

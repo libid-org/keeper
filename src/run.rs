@@ -1,7 +1,10 @@
 //! The tick: poll → decide → (maybe) notarize → submit. Plus the read-only
 //! status table.
 
-use alloy::providers::ProviderBuilder;
+use alloy::{
+    primitives::Address,
+    providers::ProviderBuilder,
+};
 use anyhow::{
     bail,
     Context,
@@ -20,21 +23,24 @@ use crate::{
     },
     decision::{
         self,
-        GoogleKey,
+        JwksKey,
+        KeyVerdict,
     },
+    jwks::Issuer,
     proof::ProofSource,
 };
 
 /// What one tick did.
 #[derive(Debug, Default)]
 pub struct TickOutcome {
-    /// Networks whose `GoogleJwtRoots` was read successfully.
-    pub networks_read: usize,
-    /// Networks that needed a rotation.
+    /// Roots contracts read successfully, across issuers and networks.
+    pub contracts_read: usize,
+    /// Roots contracts that needed a rotation.
     pub rotations_needed: usize,
     /// Rotations submitted and confirmed.
     pub rotations_submitted: usize,
-    /// Errors encountered (an erroring network never blocks the others).
+    /// Errors encountered (an erroring issuer or network never blocks the
+    /// others).
     pub errors: usize,
 }
 
@@ -72,93 +78,124 @@ pub fn check_can_submit(
     Ok(())
 }
 
-/// Fetch the live JWKS over plain HTTPS from Google's endpoint. The poll and
-/// the proof must read the SAME endpoint, or the verdicts are about one key
-/// set and the submitted claims attest another: [`decision::GOOGLE_JWKS_URL`]
-/// is the URL `jwks::request` targets, and a test there holds the two
-/// together.
-async fn fetch_google_keys() -> Result<Vec<GoogleKey>> {
-    let body = reqwest::get(decision::GOOGLE_JWKS_URL)
+/// Fetch `issuer`'s live JWKS over plain HTTPS. The poll and the proof must
+/// read the SAME endpoint, or the verdicts are about one key set and the
+/// submitted claims attest another: both fetch [`Issuer::url`], and a test in
+/// `jwks` holds the two together. reqwest decompresses what Telegram
+/// compresses.
+async fn fetch_keys(issuer: Issuer) -> Result<Vec<JwksKey>> {
+    let body = reqwest::get(issuer.url())
         .await
-        .context("fetching Google's JWKS")?
+        .with_context(|| format!("fetching {}'s JWKS", issuer.name()))?
         .error_for_status()
-        .context("Google's JWKS endpoint answered an error")?
+        .with_context(|| format!("{}'s JWKS endpoint answered an error", issuer.name()))?
         .bytes()
         .await
-        .context("reading Google's JWKS body")?;
-    decision::parse_google_jwks(&body)
+        .with_context(|| format!("reading {}'s JWKS body", issuer.name()))?;
+    decision::parse_jwks(&body).with_context(|| format!("{}'s JWKS", issuer.name()))
 }
 
-/// One pass over every network. Decisions come first for ALL networks, so a
-/// single notarized reading (obtained at most once per tick) serves every
-/// contract that needs it — the record is valid anywhere the notary is
-/// trusted, by design.
+/// The roots contracts `issuer` has across `networks`.
+fn targets(
+    networks: &[ResolvedNetwork],
+    issuer: Issuer,
+) -> Vec<(&ResolvedNetwork, Address)> {
+    networks
+        .iter()
+        .filter_map(|network| network.roots(issuer).map(|roots| (network, roots)))
+        .collect()
+}
+
+/// One pass over every issuer and network.
 pub async fn tick(
     config: &KeeperConfig,
     networks: &[ResolvedNetwork],
     dry_run: bool,
 ) -> TickOutcome {
     let mut outcome = TickOutcome::default();
+    for issuer in Issuer::ALL {
+        let targets = targets(networks, issuer);
+        if !targets.is_empty() {
+            tick_issuer(config, issuer, &targets, dry_run, &mut outcome).await;
+        }
+    }
+    outcome
+}
 
-    let google_keys = match fetch_google_keys().await {
+/// One issuer's pass. Decisions come first for ALL its contracts, so a
+/// single notarized reading (obtained at most once per tick) serves every
+/// contract that needs it — the record is valid anywhere the notary is
+/// trusted, by design.
+async fn tick_issuer(
+    config: &KeeperConfig,
+    issuer: Issuer,
+    targets: &[(&ResolvedNetwork, Address)],
+    dry_run: bool,
+    outcome: &mut TickOutcome,
+) {
+    let live_keys = match fetch_keys(issuer).await {
         Ok(keys) => keys,
         Err(e) => {
             tracing::warn!(
+                issuer = issuer.name(),
                 error = format_args!("{e:#}"),
-                "tick aborted: could not fetch Google's JWKS"
+                "issuer skipped: could not fetch its JWKS"
             );
             outcome.errors += 1;
-            return outcome;
+            return;
         }
     };
     tracing::info!(
-        kids = ?google_keys.iter().map(|k| k.kid.as_str()).collect::<Vec<_>>(),
-        "polled Google's live JWKS"
+        issuer = issuer.name(),
+        kids = ?live_keys.iter().map(|k| k.kid.as_str()).collect::<Vec<_>>(),
+        "polled the live JWKS"
     );
 
     // ── decide ──────────────────────────────────────────────────────────────
-    let mut needy: Vec<(&ResolvedNetwork, RootsReading)> = Vec::new();
-    for network in networks {
-        match read_network(config, network, &google_keys).await {
+    let mut needy: Vec<(&ResolvedNetwork, Address)> = Vec::new();
+    for &(network, contract) in targets {
+        match read_network(config, network, issuer, contract, &live_keys).await {
             Ok(reading) => {
-                outcome.networks_read += 1;
-                let contract = network.google_jwt_roots;
+                outcome.contracts_read += 1;
                 if reading.needs_rotation() {
                     outcome.rotations_needed += 1;
                     for (kid, verdict) in &reading.keys {
                         tracing::info!(
                             network = %network.name,
+                            issuer = issuer.name(),
                             contract = %contract,
                             kid = %kid,
                             verdict = verdict.label(),
                             "rotation required"
                         );
                     }
-                    needy.push((network, reading));
+                    needy.push((network, contract));
                 } else {
                     tracing::info!(
                         network = %network.name,
+                        issuer = issuer.name(),
                         contract = %contract,
                         "up-to-date, no rotation needed"
                     );
                 }
             }
             Err(e) => {
-                tracing::warn!(network = %network.name, error = format_args!("{e:#}"), "network read failed");
+                tracing::warn!(network = %network.name, issuer = issuer.name(), error = format_args!("{e:#}"), "network read failed");
                 outcome.errors += 1;
             }
         }
     }
 
     if needy.is_empty() {
-        return outcome;
+        return;
     }
     if dry_run {
         tracing::info!(
+            issuer = issuer.name(),
             networks = needy.len(),
             "dry run: rotations needed but not submitted"
         );
-        return outcome;
+        return;
     }
 
     // ── notarize once ───────────────────────────────────────────────────────
@@ -170,30 +207,31 @@ pub async fn tick(
                 "cannot obtain a notarized reading"
             );
             outcome.errors += 1;
-            return outcome;
+            return;
         }
     };
-    let session = match source.obtain().await {
+    let session = match source.obtain(issuer).await {
         Ok(session) => session,
         Err(e) => {
             tracing::warn!(
+                issuer = issuer.name(),
                 error = format_args!("{e:#}"),
                 "notarized JWKS reading failed"
             );
             outcome.errors += 1;
-            return outcome;
+            return;
         }
     };
     let calldata = chain::rotate_calldata(&session);
 
     // ── submit ──────────────────────────────────────────────────────────────
-    for (network, _) in needy {
-        match submit_to(network, calldata.clone()).await {
+    for (network, contract) in needy {
+        match submit_to(network, contract, calldata.clone()).await {
             Ok(()) => outcome.rotations_submitted += 1,
             Err(e) => {
                 tracing::warn!(
                     network = %network.name,
-                    contract = %network.google_jwt_roots,
+                    contract = %contract,
                     error = format_args!("{e:#}"),
                     "rotation submission failed"
                 );
@@ -201,31 +239,37 @@ pub async fn tick(
             }
         }
     }
-    outcome
 }
 
-/// Read one network's `GoogleJwtRoots`.
+/// Read one roots contract on one network.
 async fn read_network(
     config: &KeeperConfig,
     network: &ResolvedNetwork,
-    google_keys: &[GoogleKey],
+    issuer: Issuer,
+    contract: Address,
+    live_keys: &[JwksKey],
 ) -> Result<RootsReading> {
     let provider = ProviderBuilder::new().connect_client(network.client()?);
     let now = chain::chain_now(&provider).await?;
     chain::read_roots(
         &provider,
-        network.google_jwt_roots,
-        google_keys,
+        issuer,
+        contract,
+        live_keys,
         now,
         config.renewal_threshold_secs,
     )
     .await
-    .with_context(|| format!("reading {}", network.google_jwt_roots))
+    .with_context(|| format!("reading {contract}"))
 }
 
 /// Submit one rotation with the network's gas signer, which also pays the
 /// Notary Fee.
-async fn submit_to(network: &ResolvedNetwork, calldata: Vec<u8>) -> Result<()> {
+async fn submit_to(
+    network: &ResolvedNetwork,
+    contract: Address,
+    calldata: Vec<u8>,
+) -> Result<()> {
     let spec = network.signer.as_deref().with_context(|| {
         format!(
             "network '{}' needs a rotation but has no gas signer configured",
@@ -243,15 +287,15 @@ async fn submit_to(network: &ResolvedNetwork, calldata: Vec<u8>) -> Result<()> {
         .connect_client(network.client()?);
     tracing::info!(
         network = %network.name,
-        contract = %network.google_jwt_roots,
+        contract = %contract,
         sender = %sender,
         "submitting rotate()"
     );
     let (tx_hash, gas_used) =
-        chain::submit_rotation(&provider, network.google_jwt_roots, calldata).await?;
+        chain::submit_rotation(&provider, contract, calldata).await?;
     tracing::info!(
         network = %network.name,
-        contract = %network.google_jwt_roots,
+        contract = %contract,
         tx = %tx_hash,
         gas_used,
         "rotate() confirmed"
@@ -259,54 +303,74 @@ async fn submit_to(network: &ResolvedNetwork, calldata: Vec<u8>) -> Result<()> {
     Ok(())
 }
 
-/// The read-only status table: per network, every live Google kid with its
-/// on-chain verdict. Returns an error when any network read fails; a stale
-/// chain is NOT an error (that is what the keeper is for).
+/// The read-only status table: per issuer and network, every live kid with
+/// its on-chain verdict. Returns an error when any read fails; a stale chain
+/// is NOT an error (that is what the keeper is for).
 pub async fn status(config: &KeeperConfig, networks: &[ResolvedNetwork]) -> Result<()> {
-    let google_keys = fetch_google_keys().await?;
     println!(
-        "{:<16} {:<46} {:<12} verdict",
-        "network", "kid", "expires-in"
+        "{:<10} {:<16} {:<46} {:<12} verdict",
+        "issuer", "network", "kid", "expires-in"
     );
     let mut failures = 0usize;
-    for network in networks {
-        match read_network(config, network, &google_keys).await {
-            Ok(reading) => {
-                for (kid, verdict) in &reading.keys {
-                    use crate::decision::KeyVerdict;
-                    let left = match verdict {
-                        KeyVerdict::Fresh { secs_left }
-                        | KeyVerdict::Expiring { secs_left } => human_secs(*secs_left),
-                        KeyVerdict::Expired => "expired".into(),
-                        KeyVerdict::Untrusted => "-".into(),
-                    };
-                    println!(
-                        "{:<16} {:<46} {:<12} {}",
-                        network.name,
-                        kid,
-                        left,
-                        verdict.label()
-                    );
-                }
-                println!(
-                    "{:<16} {} => {}",
-                    network.name,
-                    network.google_jwt_roots,
-                    if reading.needs_rotation() {
-                        "NEEDS ROTATION"
-                    } else {
-                        "up-to-date"
-                    }
-                );
-            }
+    for issuer in Issuer::ALL {
+        let targets = targets(networks, issuer);
+        if targets.is_empty() {
+            continue;
+        }
+        let live_keys = match fetch_keys(issuer).await {
+            Ok(keys) => keys,
             Err(e) => {
                 failures += 1;
-                println!("{:<16} read failed: {e:#}", network.name);
+                println!("{:<10} JWKS fetch failed: {e:#}", issuer.name());
+                continue;
+            }
+        };
+        for (network, contract) in targets {
+            match read_network(config, network, issuer, contract, &live_keys).await {
+                Ok(reading) => {
+                    for (kid, verdict) in &reading.keys {
+                        let left = match verdict {
+                            KeyVerdict::Fresh { secs_left }
+                            | KeyVerdict::Expiring { secs_left } => {
+                                human_secs(*secs_left)
+                            }
+                            KeyVerdict::Expired => "expired".into(),
+                            KeyVerdict::Untrusted => "-".into(),
+                        };
+                        println!(
+                            "{:<10} {:<16} {:<46} {:<12} {}",
+                            issuer.name(),
+                            network.name,
+                            kid,
+                            left,
+                            verdict.label()
+                        );
+                    }
+                    println!(
+                        "{:<10} {:<16} {} => {}",
+                        issuer.name(),
+                        network.name,
+                        contract,
+                        if reading.needs_rotation() {
+                            "NEEDS ROTATION"
+                        } else {
+                            "up-to-date"
+                        }
+                    );
+                }
+                Err(e) => {
+                    failures += 1;
+                    println!(
+                        "{:<10} {:<16} read failed: {e:#}",
+                        issuer.name(),
+                        network.name
+                    );
+                }
             }
         }
     }
     if failures > 0 {
-        bail!("{failures} network(s) could not be read");
+        bail!("{failures} read(s) failed");
     }
     Ok(())
 }
@@ -327,8 +391,6 @@ fn human_secs(secs: u64) -> String {
 mod tests {
     use std::time::Duration;
 
-    use alloy::primitives::Address;
-
     use super::*;
 
     /// The API key in [`network`]'s endpoint, which nothing listens on.
@@ -340,7 +402,8 @@ mod tests {
             rpc_url: format!("http://127.0.0.1:1/v2/{KEY}").parse().unwrap(),
             rpc_timeout: Duration::from_secs(10),
             signer: signer.map(str::to_string),
-            google_jwt_roots: Address::ZERO,
+            google_jwt_roots: Some(Address::ZERO),
+            telegram_jwt_roots: None,
         }
     }
 
@@ -385,9 +448,15 @@ mod tests {
 
     #[tokio::test]
     async fn a_failed_read_names_no_endpoint() {
-        let error = read_network(&config(None), &network(None), &[])
-            .await
-            .unwrap_err();
+        let error = read_network(
+            &config(None),
+            &network(None),
+            Issuer::Google,
+            Address::ZERO,
+            &[],
+        )
+        .await
+        .unwrap_err();
         let message = format!("{error:#} {error:?}");
         assert!(message.contains("error sending request"), "{message}");
         assert!(!message.contains(KEY), "{message}");
@@ -395,9 +464,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_failed_submission_names_no_endpoint() {
-        let error = submit_to(&network(Some(&"ab".repeat(32))), Vec::new())
-            .await
-            .unwrap_err();
+        let error =
+            submit_to(&network(Some(&"ab".repeat(32))), Address::ZERO, Vec::new())
+                .await
+                .unwrap_err();
         let message = format!("{error:#} {error:?}");
         assert!(message.contains("quoteRotation() failed"), "{message}");
         assert!(message.contains("error sending request"), "{message}");

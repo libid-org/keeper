@@ -1,10 +1,10 @@
-//! The JWKS reading: Google's OIDC signing keys, notarized like any other
+//! The JWKS reading: an issuer's OIDC signing keys, notarized like any other
 //! session.
 //!
-//! The keeper points the same MPC-TLS machinery at
-//! `https://www.googleapis.com/oauth2/v3/certs` and gets back the record every
-//! session gets -- a [`NotarizedSession`] -- which it submits to
-//! `GoogleJwtRoots.rotate`. That contract authenticates the signature
+//! The keeper points the same MPC-TLS machinery at an [`Issuer`]'s JWKS
+//! endpoint and gets back the record every session gets -- a
+//! [`NotarizedSession`] -- which it submits to that issuer's roots contract
+//! (`GoogleJwtRoots`, `TelegramJwtRoots`). That contract authenticates the signature
 //! through the Notary Service and reads the key set straight out of the
 //! revealed transcript. The notary special-cases nothing here: it signs what it
 //! observed, and which host it observed is in the record (`authorityId`), for
@@ -35,6 +35,10 @@ pub enum Error {
         /// Human-readable failure detail.
         detail: String,
     },
+    /// The issuer compressed its reply, which the contract refuses. Telegram
+    /// does so for some requests, so another session may come back plain.
+    #[error("the issuer's reply carries a Content-Encoding")]
+    Encoded,
     /// MPC-TLS session driving failed.
     #[error(transparent)]
     Tlsn(#[from] libid_tlsn::Error),
@@ -58,16 +62,53 @@ use libid_tlsn::{
 };
 use libid_transcript::ceremony::Layout;
 
-/// The TLS server name the JWKS reading authenticates. The record carries
-/// `keccak256` of it as `authorityId`, and `GoogleJwtRoots` refuses any
-/// other -- and, because googleapis.com serves many virtual hosts under one
-/// certificate, also requires the `Host` header the request carries to name
-/// this same host.
-pub const JWKS_DOMAIN: &str = "www.googleapis.com";
+/// An OIDC issuer whose signing keys the keeper keeps trusted on chain.
+///
+/// Host and request line are copies of `CeremonyProfile.jwksHost` and
+/// `jwksRequestLine`, which the roots contract pins byte for byte: the record
+/// carries `keccak256` of the host as `authorityId`, and the contract also
+/// requires the one `Host` header to name it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Issuer {
+    /// `GoogleJwtRoots`, read by `google/v1`.
+    Google,
+    /// `TelegramJwtRoots`, read by `telegram/v1`.
+    Telegram,
+}
 
-/// The endpoint the JWKS reading requests. The contract pins the request line
-/// `GET /oauth2/v3/certs HTTP/1.1` byte for byte.
-pub const JWKS_ENDPOINT: &str = "/oauth2/v3/certs";
+impl Issuer {
+    /// Every issuer, in the order a tick serves them.
+    pub const ALL: [Self; 2] = [Self::Google, Self::Telegram];
+
+    /// Name for logs and the status table.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Google => "google",
+            Self::Telegram => "telegram",
+        }
+    }
+
+    /// The TLS server name and `Host` value.
+    pub fn host(self) -> &'static str {
+        match self {
+            Self::Google => "www.googleapis.com",
+            Self::Telegram => "oauth.telegram.org",
+        }
+    }
+
+    /// The request path.
+    pub fn path(self) -> &'static str {
+        match self {
+            Self::Google => "/oauth2/v3/certs",
+            Self::Telegram => "/.well-known/jwks.json",
+        }
+    }
+
+    /// The URL both the poll and the notarized reading fetch.
+    pub fn url(self) -> String {
+        format!("https://{}{}", self.host(), self.path())
+    }
+}
 
 /// What the JWKS reading discloses: everything, in both directions.
 ///
@@ -82,12 +123,29 @@ pub const JWKS_ENDPOINT: &str = "/oauth2/v3/certs";
 /// the reveals are named and the commitments are their complement, here empty
 /// -- so each direction tiles by construction, which is what the contract's
 /// `requireExactCoverage` demands.
-pub fn layout(sent: &[u8], recv: &[u8]) -> (Layout, Layout) {
+///
+/// `None` when the reply's head carries a `Content-Encoding`: the contract
+/// refuses any (`EncodedBody`), so the session stops before the notary signs.
+pub fn layout(sent: &[u8], recv: &[u8]) -> Option<(Layout, Layout)> {
+    if is_encoded(recv) {
+        return None;
+    }
     let whole = |bytes: &[u8]| Layout {
         reveal: std::iter::once(0..bytes.len()).collect(),
         commit: Vec::new(),
     };
-    (whole(sent), whole(recv))
+    Some((whole(sent), whole(recv)))
+}
+
+/// Whether the response head names a `Content-Encoding`, in any case.
+fn is_encoded(recv: &[u8]) -> bool {
+    let head = recv
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map_or(recv, |end| &recv[..end]);
+    head.split(|&b| b == b'\n').any(|line| {
+        line.len() >= 17 && line[..17].eq_ignore_ascii_case(b"content-encoding:")
+    })
 }
 
 /// The request the reading sends.
@@ -100,8 +158,8 @@ pub fn layout(sent: &[u8], recv: &[u8]) -> (Layout, Layout) {
 /// transcript is exactly:
 ///
 /// ```text
-/// GET /oauth2/v3/certs HTTP/1.1\r\n
-/// host: www.googleapis.com\r\n
+/// GET <path> HTTP/1.1\r\n
+/// host: <host>\r\n
 /// connection: close\r\n
 /// accept: application/json\r\n
 /// user-agent: <user_agent>\r\n
@@ -110,11 +168,14 @@ pub fn layout(sent: &[u8], recv: &[u8]) -> (Layout, Layout) {
 ///
 /// `connection: close` makes the server delimit the response, so the prover
 /// reads to EOF and the transcript ends where the body does.
-pub(crate) fn request(user_agent: &str) -> Result<HttpRequest<HttpBody<Bytes>>> {
+pub(crate) fn request(
+    issuer: Issuer,
+    user_agent: &str,
+) -> Result<HttpRequest<HttpBody<Bytes>>> {
     HttpRequest::builder()
         .method("GET")
-        .uri(format!("https://{JWKS_DOMAIN}{JWKS_ENDPOINT}"))
-        .header("Host", JWKS_DOMAIN)
+        .uri(issuer.url())
+        .header("Host", issuer.host())
         .header("Connection", "close")
         .header("Accept", "application/json")
         .header("User-Agent", user_agent)
@@ -150,7 +211,7 @@ mod tests {
     fn reveals_both_directions_whole_and_commits_nothing() {
         let sent = b"GET /oauth2/v3/certs HTTP/1.1\r\nhost: www.googleapis.com\r\n\r\n";
         let recv = b"HTTP/1.1 200 OK\r\n\r\n{\"keys\":[]}";
-        let (s, r) = layout(sent, recv);
+        let (s, r) = layout(sent, recv).unwrap();
 
         assert_eq!(s.reveal.len(), 1, "one range, not several to cut between");
         assert_eq!(s.reveal[0], 0..sent.len());
@@ -165,33 +226,79 @@ mod tests {
         assert_tiles(&r, recv.len());
     }
 
+    /// An encoded reply, as Telegram sends some even unasked. The contract
+    /// refuses it, so the notary must not sign.
     #[test]
-    fn the_request_names_the_host_the_path_and_the_four_headers() {
-        let request = request("libid-keeper/test").unwrap();
-        assert_eq!(request.method(), "GET");
-        assert_eq!(request.uri().host(), Some(JWKS_DOMAIN));
-        assert_eq!(request.uri().path(), JWKS_ENDPOINT);
-        let headers: Vec<(&str, &[u8])> = request
-            .headers()
-            .iter()
-            .map(|(name, value)| (name.as_str(), value.as_bytes()))
-            .collect();
-        let expected: Vec<(&str, &[u8])> = vec![
-            ("host", JWKS_DOMAIN.as_bytes()),
-            ("connection", b"close"),
-            ("accept", b"application/json"),
-            ("user-agent", b"libid-keeper/test"),
-        ];
-        assert_eq!(headers, expected);
+    fn an_encoded_reply_is_not_laid_out() {
+        let sent =
+            b"GET /.well-known/jwks.json HTTP/1.1\r\nhost: oauth.telegram.org\r\n\r\n";
+        for header in ["Content-Encoding: gzip", "content-encoding: identity"] {
+            let recv = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: 4\r\n{header}\r\n\r\n\x1f\u{8b}.."
+            );
+            assert!(layout(sent, recv.as_bytes()).is_none(), "{header}");
+        }
     }
 
-    /// The poll (`run::fetch_google_keys`) and the notarized session must
-    /// read ONE endpoint, or the verdicts describe one key set and the record
-    /// attests another. The poll fetches `decision::GOOGLE_JWKS_URL`; this is
-    /// what the session requests.
+    /// Only the head counts: a body that mentions the header is plain.
+    #[test]
+    fn a_body_naming_the_header_is_still_laid_out() {
+        let recv = b"HTTP/1.1 200 OK\r\n\r\n\ncontent-encoding: gzip";
+        assert!(layout(b"GET / HTTP/1.1\r\n\r\n", recv).is_some());
+    }
+
+    #[test]
+    fn the_request_names_the_host_the_path_and_the_four_headers() {
+        for issuer in Issuer::ALL {
+            let request = request(issuer, "libid-keeper/test").unwrap();
+            assert_eq!(request.method(), "GET");
+            assert_eq!(request.uri().host(), Some(issuer.host()));
+            assert_eq!(request.uri().path(), issuer.path());
+            let headers: Vec<(&str, &[u8])> = request
+                .headers()
+                .iter()
+                .map(|(name, value)| (name.as_str(), value.as_bytes()))
+                .collect();
+            let expected: Vec<(&str, &[u8])> = vec![
+                ("host", issuer.host().as_bytes()),
+                ("connection", b"close"),
+                ("accept", b"application/json"),
+                ("user-agent", b"libid-keeper/test"),
+            ];
+            assert_eq!(headers, expected);
+        }
+    }
+
+    /// The contracts' `CeremonyProfile` constants, written out: the request
+    /// line and the host each roots contract pins.
+    #[test]
+    fn each_issuer_requests_what_its_contract_pins() {
+        let pinned = [
+            (
+                Issuer::Google,
+                "www.googleapis.com",
+                "GET /oauth2/v3/certs HTTP/1.1\r\n",
+            ),
+            (
+                Issuer::Telegram,
+                "oauth.telegram.org",
+                "GET /.well-known/jwks.json HTTP/1.1\r\n",
+            ),
+        ];
+        for (issuer, host, line) in pinned {
+            assert_eq!(issuer.host(), host);
+            assert_eq!(format!("GET {} HTTP/1.1\r\n", issuer.path()), line);
+        }
+    }
+
+    /// The poll and the notarized session must read ONE endpoint, or the
+    /// verdicts describe one key set and the record attests another. The
+    /// poll fetches `Issuer::url`; this is what the session requests.
     #[test]
     fn the_request_targets_the_url_the_poll_reads() {
-        let request = request("libid-keeper/test").unwrap();
-        assert_eq!(request.uri().to_string(), crate::decision::GOOGLE_JWKS_URL);
+        for issuer in Issuer::ALL {
+            let request = request(issuer, "libid-keeper/test").unwrap();
+            assert_eq!(request.uri().to_string(), issuer.url());
+        }
     }
 }
