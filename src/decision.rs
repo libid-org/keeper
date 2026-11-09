@@ -30,6 +30,16 @@ pub struct JwksKey {
     pub modulus_hash: B256,
 }
 
+/// An issuer's live JWKS, as the roots contract would read it.
+#[derive(Debug, Clone)]
+pub struct LiveKeys {
+    /// The RSA keys, in the issuer's order.
+    pub keys: Vec<JwksKey>,
+    /// Every entry, non-RSA ones included: what the contract counts against
+    /// `MAX_KEYS`.
+    pub entries: usize,
+}
+
 /// Wire shape of a JWKS, reduced to what the decision needs.
 #[derive(Debug, Deserialize)]
 struct Jwks {
@@ -46,45 +56,49 @@ struct Jwk {
     kty: Option<String>,
     #[serde(default)]
     n: Option<String>,
+    #[serde(default)]
+    e: Option<String>,
 }
 
-/// Parse a JWKS response body into [`JwksKey`]s. A key whose `kty` is
-/// present and not `RSA` is skipped unread, as the contract skips it; an RSA
-/// key without `kid` or `n` fails the parse, as it fails the contract's
-/// reading.
-pub fn parse_jwks(body: &[u8]) -> Result<Vec<JwksKey>> {
+/// Parse a JWKS response body. Fails on what makes `JwtRootsBase` refuse
+/// the whole reading, naming the contract's error; `MAX_KEYS` is the
+/// contract's to state, so [`crate::chain::read_roots`] checks `entries`.
+/// JSON syntax the contract refuses (escapes, nesting) is not checked.
+pub fn parse_jwks(body: &[u8]) -> Result<LiveKeys> {
     let jwks: Jwks = serde_json::from_slice(body).context("parsing JWKS JSON")?;
-    if jwks.keys.is_empty() {
-        bail!("the JWKS response contains no keys");
-    }
-    // A key the contract would refuse is left out of the decision rather than
-    // failing the tick: the contract installs only 2048-bit moduli
-    // (`InvalidModulusLength` otherwise), so classifying such a key as
-    // untrusted would make the keeper submit a rotation that reverts, every
-    // tick, until the issuer stopped publishing it. Skipping it keeps the
-    // live keys rotating; the warning says which key was ignored and why.
-    let mut keys = Vec::with_capacity(jwks.keys.len());
+    let mut keys: Vec<JwksKey> = Vec::with_capacity(jwks.keys.len());
     for jwk in &jwks.keys {
         if jwk.kty.as_deref().is_some_and(|kty| kty != "RSA") {
             continue;
         }
-        let (Some(kid), Some(n)) = (&jwk.kid, &jwk.n) else {
-            bail!("the JWKS response has an RSA key without `kid` or `n`");
-        };
-        match modulus_hash(n) {
-            Ok(modulus_hash) => keys.push(JwksKey {
-                kid: kid.clone(),
-                modulus_hash,
-            }),
-            Err(e) => {
-                tracing::warn!(kid = %kid, error = format_args!("{e:#}"), "ignoring a key the contract would refuse")
-            }
+        let key = read_key(jwk)?;
+        if keys.iter().any(|k| k.modulus_hash == key.modulus_hash) {
+            bail!("key {} repeats a modulus (DuplicateKey)", key.kid);
         }
+        keys.push(key);
     }
     if keys.is_empty() {
-        bail!("the JWKS response contains no key the contract would accept");
+        bail!("the JWKS lists no RSA key (EmptyKeySet)");
     }
-    Ok(keys)
+    Ok(LiveKeys {
+        keys,
+        entries: jwks.keys.len(),
+    })
+}
+
+/// One RSA key, refused where `_readKey` refuses it.
+fn read_key(jwk: &Jwk) -> Result<JwksKey> {
+    let (Some(kid), Some(n), Some(e)) = (&jwk.kid, &jwk.n, &jwk.e) else {
+        bail!("an RSA key lacks `kid`, `n` or `e` (MissingMember)");
+    };
+    if e != "AQAB" {
+        bail!("key {kid} has exponent {e}, not AQAB (WrongExponent)");
+    }
+    let modulus_hash = modulus_hash(n).with_context(|| format!("key {kid}"))?;
+    Ok(JwksKey {
+        kid: kid.clone(),
+        modulus_hash,
+    })
 }
 
 /// keccak256 of the modulus rendered as 18 little-endian 120-bit limbs, each
@@ -103,7 +117,8 @@ pub fn modulus_hash(n_b64url: &str) -> Result<B256> {
         .context("modulus is not base64url")?;
     if n_bytes.len() != MODULUS_BYTES {
         bail!(
-            "modulus is {} bytes, not the {MODULUS_BYTES} the contract accepts",
+            "modulus is {} bytes, not the {MODULUS_BYTES} the contract accepts \
+             (InvalidModulusLength)",
             n_bytes.len()
         );
     }
@@ -210,7 +225,9 @@ mod tests {
             modulus(3),
             modulus(89)
         );
-        let keys = parse_jwks(body.as_bytes()).unwrap();
+        let live = parse_jwks(body.as_bytes()).unwrap();
+        assert_eq!(live.entries, 2);
+        let keys = live.keys;
         assert_eq!(keys.len(), 2);
         assert_eq!(keys[0].kid, "k1");
         assert_eq!(keys[1].kid, "k2");
@@ -223,7 +240,7 @@ mod tests {
     #[test]
     fn parse_jwks_reads_the_body_google_serves() {
         let body = include_bytes!("../tests/fixtures/certs.json");
-        let keys = parse_jwks(body).unwrap();
+        let keys = parse_jwks(body).unwrap().keys;
         assert_eq!(keys.len(), 2, "Google published two keys that day");
     }
 
@@ -232,51 +249,64 @@ mod tests {
     #[test]
     fn parse_jwks_keeps_only_telegrams_rsa_key() {
         let body = include_bytes!("../tests/fixtures/telegram-jwks.json");
-        let keys = parse_jwks(body).unwrap();
-        assert_eq!(keys.len(), 1);
-        assert_eq!(keys[0].kid, "oidc-1");
+        let live = parse_jwks(body).unwrap();
+        assert_eq!(live.entries, 4, "the contract counts the skipped keys too");
+        assert_eq!(live.keys.len(), 1);
+        assert_eq!(live.keys[0].kid, "oidc-1");
     }
 
-    /// The contract refuses any modulus that is not 256 bytes, so a key of
-    /// another size must not reach the decision: it is skipped, the others
-    /// still rotate.
+    /// The contract refuses the whole reading over one RSA key it cannot
+    /// read, so the parse fails too, naming the contract's error.
     #[test]
-    fn parse_jwks_skips_a_key_the_contract_would_refuse() {
-        let body = format!(
-            r#"{{"keys":[
-            {{"kid":"short","n":"AQAB","e":"AQAB"}},
-            {{"kid":"k2","n":"{}","e":"AQAB"}}
-        ]}}"#,
-            modulus(7)
-        );
-        let keys = parse_jwks(body.as_bytes()).unwrap();
-        assert_eq!(keys.len(), 1);
-        assert_eq!(keys[0].kid, "k2");
+    fn parse_jwks_refuses_what_the_contract_refuses() {
+        let good = format!(r#"{{"kid":"k1","n":"{}","e":"AQAB"}}"#, modulus(5));
+        let refused = [
+            (
+                r#"{"kid":"short","n":"AQAB","e":"AQAB"}"#.to_string(),
+                "InvalidModulusLength",
+            ),
+            (
+                format!(r#"{{"kid":"k2","n":"{}","e":"AAEAAQ"}}"#, modulus(7)),
+                "WrongExponent",
+            ),
+            (
+                format!(r#"{{"kid":"k2","n":"{}"}}"#, modulus(7)),
+                "MissingMember",
+            ),
+            (
+                r#"{"kty":"RSA","kid":"k2","e":"AQAB"}"#.to_string(),
+                "MissingMember",
+            ),
+            (
+                format!(r#"{{"kty":"RSA","n":"{}","e":"AQAB"}}"#, modulus(7)),
+                "MissingMember",
+            ),
+            (good.replace("k1", "k2"), "DuplicateKey"),
+        ];
+        for (key, error) in refused {
+            let body = format!(r#"{{"keys":[{good},{key}]}}"#);
+            let err = parse_jwks(body.as_bytes()).unwrap_err();
+            assert!(format!("{err:#}").contains(error), "{key}: {err:#}");
+        }
     }
 
-    /// The contract skips a non-RSA key unread, `kid` or not, and refuses
-    /// the whole reading over an RSA key it cannot read.
+    /// The contract skips a non-RSA key unread, `kid` or not.
     #[test]
-    fn parse_jwks_needs_kid_and_n_on_rsa_keys_only() {
+    fn parse_jwks_skips_non_rsa_keys_unread() {
         let rsa = format!(
             r#"{{"kty":"RSA","kid":"k1","n":"{}","e":"AQAB"}}"#,
             modulus(5)
         );
         let body =
             format!(r#"{{"keys":[{{"kty":"OKP","crv":"Ed25519","x":"AA"}},{rsa}]}}"#);
-        assert_eq!(parse_jwks(body.as_bytes()).unwrap().len(), 1);
-        for broken in [
-            r#"{"kty":"RSA","kid":"k2","e":"AQAB"}"#,
-            r#"{"kty":"RSA","n":"AQAB","e":"AQAB"}"#,
-        ] {
-            let body = format!(r#"{{"keys":[{rsa},{broken}]}}"#);
-            assert!(parse_jwks(body.as_bytes()).is_err(), "{broken}");
-        }
+        let live = parse_jwks(body.as_bytes()).unwrap();
+        assert_eq!((live.keys.len(), live.entries), (1, 2));
     }
 
     #[test]
-    fn parse_jwks_rejects_a_set_with_no_acceptable_key() {
-        assert!(parse_jwks(br#"{"keys":[{"kid":"short","n":"AQAB"}]}"#).is_err());
+    fn parse_jwks_refuses_a_set_with_no_rsa_key() {
+        let err = parse_jwks(br#"{"keys":[{"kty":"EC","kid":"a"}]}"#).unwrap_err();
+        assert!(err.to_string().contains("EmptyKeySet"), "{err:#}");
     }
 
     #[test]

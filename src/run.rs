@@ -1,6 +1,8 @@
 //! The tick: poll → decide → (maybe) notarize → submit. Plus the read-only
 //! status table.
 
+use std::time::Duration;
+
 use alloy::{
     primitives::Address,
     providers::ProviderBuilder,
@@ -23,8 +25,8 @@ use crate::{
     },
     decision::{
         self,
-        JwksKey,
         KeyVerdict,
+        LiveKeys,
     },
     jwks::Issuer,
     proof::ProofSource,
@@ -78,31 +80,105 @@ pub fn check_can_submit(
     Ok(())
 }
 
+/// How long the plain-HTTPS poll may take, and its connect.
+const POLL_TIMEOUT: Duration = Duration::from_secs(30);
+const POLL_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Fetch `issuer`'s live JWKS over plain HTTPS. The poll and the proof must
 /// read the SAME endpoint, or the verdicts are about one key set and the
 /// submitted claims attest another: both fetch [`Issuer::url`], and a test in
 /// `jwks` holds the two together. reqwest decompresses what Telegram
 /// compresses.
-async fn fetch_keys(issuer: Issuer) -> Result<Vec<JwksKey>> {
-    let body = reqwest::get(issuer.url())
+async fn fetch_keys(issuer: Issuer) -> Result<LiveKeys> {
+    let client = reqwest::Client::builder()
+        .timeout(POLL_TIMEOUT)
+        .connect_timeout(POLL_CONNECT_TIMEOUT)
+        .build()
+        .context("building the JWKS client")?;
+    let body = client
+        .get(issuer.url())
+        .send()
         .await
-        .with_context(|| format!("fetching {}'s JWKS", issuer.name()))?
+        .with_context(|| format!("fetching {issuer}'s JWKS"))?
         .error_for_status()
-        .with_context(|| format!("{}'s JWKS endpoint answered an error", issuer.name()))?
+        .with_context(|| format!("{issuer}'s JWKS endpoint answered an error"))?
         .bytes()
         .await
-        .with_context(|| format!("reading {}'s JWKS body", issuer.name()))?;
-    decision::parse_jwks(&body).with_context(|| format!("{}'s JWKS", issuer.name()))
+        .with_context(|| format!("reading {issuer}'s JWKS body"))?;
+    decision::parse_jwks(&body).with_context(|| format!("{issuer}'s JWKS"))
+}
+
+/// One roots contract: an issuer's, on one network.
+struct Target<'a> {
+    network: &'a ResolvedNetwork,
+    issuer: Issuer,
+    contract: Address,
+}
+
+impl Target<'_> {
+    /// Read the contract's verdicts on `live`.
+    async fn read(&self, config: &KeeperConfig, live: &LiveKeys) -> Result<RootsReading> {
+        let provider = ProviderBuilder::new().connect_client(self.network.client()?);
+        chain::read_roots(
+            &provider,
+            self.issuer,
+            self.contract,
+            live,
+            config.renewal_threshold_secs,
+        )
+        .await
+        .with_context(|| format!("reading {}", self.contract))
+    }
+
+    /// Submit one rotation with the network's gas signer, which also pays
+    /// the Notary Fee.
+    async fn submit(&self, calldata: Vec<u8>) -> Result<()> {
+        let network = self.network;
+        let spec = network.signer.as_deref().with_context(|| {
+            format!(
+                "network '{}' needs a rotation but has no gas signer configured",
+                network.name
+            )
+        })?;
+        let source = SignerSource::from_spec(spec)
+            .map_err(|e| anyhow::anyhow!("gas signer spec: {e}"))?;
+        let (wallet, sender) = source
+            .build_wallet(None)
+            .await
+            .map_err(|e| anyhow::anyhow!("gas signer build: {e}"))?;
+        let provider = ProviderBuilder::new()
+            .wallet(wallet)
+            .connect_client(network.client()?);
+        tracing::info!(
+            network = %network.name,
+            contract = %self.contract,
+            sender = %sender,
+            "submitting rotate()"
+        );
+        let (tx_hash, gas_used) =
+            chain::submit_rotation(&provider, self.contract, calldata).await?;
+        tracing::info!(
+            network = %network.name,
+            contract = %self.contract,
+            tx = %tx_hash,
+            gas_used,
+            "rotate() confirmed"
+        );
+        Ok(())
+    }
 }
 
 /// The roots contracts `issuer` has across `networks`.
-fn targets(
-    networks: &[ResolvedNetwork],
-    issuer: Issuer,
-) -> Vec<(&ResolvedNetwork, Address)> {
+fn targets(networks: &[ResolvedNetwork], issuer: Issuer) -> Vec<Target<'_>> {
     networks
         .iter()
-        .filter_map(|network| network.roots(issuer).map(|roots| (network, roots)))
+        .filter_map(|network| {
+            network.roots(issuer).map(|contract| Target {
+                network,
+                issuer,
+                contract,
+            })
+        })
         .collect()
 }
 
@@ -129,15 +205,15 @@ pub async fn tick(
 async fn tick_issuer(
     config: &KeeperConfig,
     issuer: Issuer,
-    targets: &[(&ResolvedNetwork, Address)],
+    targets: &[Target<'_>],
     dry_run: bool,
     outcome: &mut TickOutcome,
 ) {
-    let live_keys = match fetch_keys(issuer).await {
-        Ok(keys) => keys,
+    let live = match fetch_keys(issuer).await {
+        Ok(live) => live,
         Err(e) => {
             tracing::warn!(
-                issuer = issuer.name(),
+                issuer = %issuer,
                 error = format_args!("{e:#}"),
                 "issuer skipped: could not fetch its JWKS"
             );
@@ -146,41 +222,42 @@ async fn tick_issuer(
         }
     };
     tracing::info!(
-        issuer = issuer.name(),
-        kids = ?live_keys.iter().map(|k| k.kid.as_str()).collect::<Vec<_>>(),
+        issuer = %issuer,
+        kids = ?live.keys.iter().map(|k| k.kid.as_str()).collect::<Vec<_>>(),
         "polled the live JWKS"
     );
 
     // ── decide ──────────────────────────────────────────────────────────────
-    let mut needy: Vec<(&ResolvedNetwork, Address)> = Vec::new();
-    for &(network, contract) in targets {
-        match read_network(config, network, issuer, contract, &live_keys).await {
+    let mut needy: Vec<&Target> = Vec::new();
+    for target in targets {
+        let (network, contract) = (&target.network.name, target.contract);
+        match target.read(config, &live).await {
             Ok(reading) => {
                 outcome.contracts_read += 1;
                 if reading.needs_rotation() {
                     outcome.rotations_needed += 1;
                     for (kid, verdict) in &reading.keys {
                         tracing::info!(
-                            network = %network.name,
-                            issuer = issuer.name(),
+                            network = %network,
+                            issuer = %issuer,
                             contract = %contract,
                             kid = %kid,
                             verdict = verdict.label(),
                             "rotation required"
                         );
                     }
-                    needy.push((network, contract));
+                    needy.push(target);
                 } else {
                     tracing::info!(
-                        network = %network.name,
-                        issuer = issuer.name(),
+                        network = %network,
+                        issuer = %issuer,
                         contract = %contract,
                         "up-to-date, no rotation needed"
                     );
                 }
             }
             Err(e) => {
-                tracing::warn!(network = %network.name, issuer = issuer.name(), error = format_args!("{e:#}"), "network read failed");
+                tracing::warn!(network = %network, issuer = %issuer, error = format_args!("{e:#}"), "network read failed");
                 outcome.errors += 1;
             }
         }
@@ -191,7 +268,7 @@ async fn tick_issuer(
     }
     if dry_run {
         tracing::info!(
-            issuer = issuer.name(),
+            issuer = %issuer,
             networks = needy.len(),
             "dry run: rotations needed but not submitted"
         );
@@ -214,7 +291,7 @@ async fn tick_issuer(
         Ok(session) => session,
         Err(e) => {
             tracing::warn!(
-                issuer = issuer.name(),
+                issuer = %issuer,
                 error = format_args!("{e:#}"),
                 "notarized JWKS reading failed"
             );
@@ -225,13 +302,13 @@ async fn tick_issuer(
     let calldata = chain::rotate_calldata(&session);
 
     // ── submit ──────────────────────────────────────────────────────────────
-    for (network, contract) in needy {
-        match submit_to(network, contract, calldata.clone()).await {
+    for target in needy {
+        match target.submit(calldata.clone()).await {
             Ok(()) => outcome.rotations_submitted += 1,
             Err(e) => {
                 tracing::warn!(
-                    network = %network.name,
-                    contract = %contract,
+                    network = %target.network.name,
+                    contract = %target.contract,
                     error = format_args!("{e:#}"),
                     "rotation submission failed"
                 );
@@ -239,68 +316,6 @@ async fn tick_issuer(
             }
         }
     }
-}
-
-/// Read one roots contract on one network.
-async fn read_network(
-    config: &KeeperConfig,
-    network: &ResolvedNetwork,
-    issuer: Issuer,
-    contract: Address,
-    live_keys: &[JwksKey],
-) -> Result<RootsReading> {
-    let provider = ProviderBuilder::new().connect_client(network.client()?);
-    let now = chain::chain_now(&provider).await?;
-    chain::read_roots(
-        &provider,
-        issuer,
-        contract,
-        live_keys,
-        now,
-        config.renewal_threshold_secs,
-    )
-    .await
-    .with_context(|| format!("reading {contract}"))
-}
-
-/// Submit one rotation with the network's gas signer, which also pays the
-/// Notary Fee.
-async fn submit_to(
-    network: &ResolvedNetwork,
-    contract: Address,
-    calldata: Vec<u8>,
-) -> Result<()> {
-    let spec = network.signer.as_deref().with_context(|| {
-        format!(
-            "network '{}' needs a rotation but has no gas signer configured",
-            network.name
-        )
-    })?;
-    let source = SignerSource::from_spec(spec)
-        .map_err(|e| anyhow::anyhow!("gas signer spec: {e}"))?;
-    let (wallet, sender) = source
-        .build_wallet(None)
-        .await
-        .map_err(|e| anyhow::anyhow!("gas signer build: {e}"))?;
-    let provider = ProviderBuilder::new()
-        .wallet(wallet)
-        .connect_client(network.client()?);
-    tracing::info!(
-        network = %network.name,
-        contract = %contract,
-        sender = %sender,
-        "submitting rotate()"
-    );
-    let (tx_hash, gas_used) =
-        chain::submit_rotation(&provider, contract, calldata).await?;
-    tracing::info!(
-        network = %network.name,
-        contract = %contract,
-        tx = %tx_hash,
-        gas_used,
-        "rotate() confirmed"
-    );
-    Ok(())
 }
 
 /// The read-only status table: per issuer and network, every live kid with
@@ -317,16 +332,17 @@ pub async fn status(config: &KeeperConfig, networks: &[ResolvedNetwork]) -> Resu
         if targets.is_empty() {
             continue;
         }
-        let live_keys = match fetch_keys(issuer).await {
-            Ok(keys) => keys,
+        let live = match fetch_keys(issuer).await {
+            Ok(live) => live,
             Err(e) => {
                 failures += 1;
-                println!("{:<10} JWKS fetch failed: {e:#}", issuer.name());
+                println!("{:<10} JWKS fetch failed: {e:#}", issuer);
                 continue;
             }
         };
-        for (network, contract) in targets {
-            match read_network(config, network, issuer, contract, &live_keys).await {
+        for target in targets {
+            let (network, contract) = (target.network, target.contract);
+            match target.read(config, &live).await {
                 Ok(reading) => {
                     for (kid, verdict) in &reading.keys {
                         let left = match verdict {
@@ -339,7 +355,7 @@ pub async fn status(config: &KeeperConfig, networks: &[ResolvedNetwork]) -> Resu
                         };
                         println!(
                             "{:<10} {:<16} {:<46} {:<12} {}",
-                            issuer.name(),
+                            issuer,
                             network.name,
                             kid,
                             left,
@@ -348,7 +364,7 @@ pub async fn status(config: &KeeperConfig, networks: &[ResolvedNetwork]) -> Resu
                     }
                     println!(
                         "{:<10} {:<16} {} => {}",
-                        issuer.name(),
+                        issuer,
                         network.name,
                         contract,
                         if reading.needs_rotation() {
@@ -360,11 +376,7 @@ pub async fn status(config: &KeeperConfig, networks: &[ResolvedNetwork]) -> Resu
                 }
                 Err(e) => {
                     failures += 1;
-                    println!(
-                        "{:<10} {:<16} read failed: {e:#}",
-                        issuer.name(),
-                        network.name
-                    );
+                    println!("{:<10} {:<16} read failed: {e:#}", issuer, network.name);
                 }
             }
         }
@@ -448,15 +460,17 @@ mod tests {
 
     #[tokio::test]
     async fn a_failed_read_names_no_endpoint() {
-        let error = read_network(
-            &config(None),
-            &network(None),
-            Issuer::Google,
-            Address::ZERO,
-            &[],
-        )
-        .await
-        .unwrap_err();
+        let network = network(None);
+        let target = Target {
+            network: &network,
+            issuer: Issuer::Google,
+            contract: Address::ZERO,
+        };
+        let live = LiveKeys {
+            keys: Vec::new(),
+            entries: 0,
+        };
+        let error = target.read(&config(None), &live).await.unwrap_err();
         let message = format!("{error:#} {error:?}");
         assert!(message.contains("error sending request"), "{message}");
         assert!(!message.contains(KEY), "{message}");
@@ -464,10 +478,13 @@ mod tests {
 
     #[tokio::test]
     async fn a_failed_submission_names_no_endpoint() {
-        let error =
-            submit_to(&network(Some(&"ab".repeat(32))), Address::ZERO, Vec::new())
-                .await
-                .unwrap_err();
+        let network = network(Some(&"ab".repeat(32)));
+        let target = Target {
+            network: &network,
+            issuer: Issuer::Google,
+            contract: Address::ZERO,
+        };
+        let error = target.submit(Vec::new()).await.unwrap_err();
         let message = format!("{error:#} {error:?}");
         assert!(message.contains("quoteRotation() failed"), "{message}");
         assert!(message.contains("error sending request"), "{message}");

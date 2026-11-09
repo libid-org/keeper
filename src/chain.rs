@@ -18,6 +18,8 @@
 //! while the current reading still has runway) and its 7-day runway is fixed
 //! where `renewal_threshold_secs` is configurable — so the decision stays here.
 
+use std::time::Duration;
+
 use crate::jwks::NotarizedSession;
 use alloy::{
     eips::BlockNumberOrTag,
@@ -44,8 +46,8 @@ use libid_contracts::bindings::ceremony::GoogleJwtRoots as JwtRoots;
 use crate::{
     decision::{
         key_verdict,
-        JwksKey,
         KeyVerdict,
+        LiveKeys,
     },
     jwks::Issuer,
 };
@@ -76,14 +78,14 @@ pub async fn chain_now<P: Provider>(provider: &P) -> Result<u64> {
 }
 
 /// Read the trust state of `issuer`'s roots contract at `roots` for every
-/// live key of the issuer and classify it. Fails when the contract pins
-/// another host: a reading of `issuer` would revert `WrongAuthority` there.
+/// live key of the issuer and classify it against the chain's clock. Fails
+/// when the contract would refuse any reading of `live`: it pins another host
+/// (`WrongAuthority`), or the issuer lists more than its `MAX_KEYS`.
 pub async fn read_roots<P: Provider>(
     provider: &P,
     issuer: Issuer,
     roots: Address,
-    live_keys: &[JwksKey],
-    now: u64,
+    live: &LiveKeys,
     threshold: u64,
 ) -> Result<RootsReading> {
     let contract = JwtRoots::new(roots, provider);
@@ -94,13 +96,24 @@ pub async fn read_roots<P: Provider>(
         .context("AUTHORITY() failed")?;
     if authority != keccak256(issuer.host()) {
         bail!(
-            "{roots} is not {}'s roots contract: it pins another host than {}",
-            issuer.name(),
+            "{roots} is not {issuer}'s roots contract: it pins another host than {}",
             issuer.host()
         );
     }
-    let mut keys = Vec::with_capacity(live_keys.len());
-    for key in live_keys {
+    let max_keys = contract
+        .MAX_KEYS()
+        .call()
+        .await
+        .context("MAX_KEYS() failed")?;
+    if U256::from(live.entries) > max_keys {
+        bail!(
+            "{issuer} lists {} keys, more than the {max_keys} {roots} reads (TooManyKeys)",
+            live.entries
+        );
+    }
+    let now = chain_now(provider).await?;
+    let mut keys = Vec::with_capacity(live.keys.len());
+    for key in &live.keys {
         let expiry = contract
             .trustedHashExpiresAt(key.modulus_hash)
             .call()
@@ -136,9 +149,13 @@ pub fn rotate_calldata(session: &NotarizedSession) -> Vec<u8> {
     .abi_encode()
 }
 
+/// How long [`submit_rotation`] waits for the receipt. A rotation that lands
+/// later is read as trusted on the next tick.
+const RECEIPT_TIMEOUT: Duration = Duration::from_secs(120);
+
 /// Submit `rotate(...)` to `roots` with the Notary Fee attached and wait for
-/// the receipt. Returns the transaction hash and gas used; errors when the
-/// transaction reverts.
+/// the receipt, up to [`RECEIPT_TIMEOUT`]. Returns the transaction hash and
+/// gas used; errors when the transaction reverts.
 ///
 /// The fee is quoted right before sending, not at read time: `rotate` takes
 /// exactly `quoteRotation()` (the Notary Service's current `fee()`), so a fee
@@ -163,6 +180,7 @@ pub async fn submit_rotation<P: Provider>(
         .send_transaction(tx)
         .await
         .context("rotate() send failed")?
+        .with_timeout(Some(RECEIPT_TIMEOUT))
         .get_receipt()
         .await
         .context("rotate() receipt failed")?;
@@ -177,7 +195,58 @@ pub async fn submit_rotation<P: Provider>(
 
 #[cfg(test)]
 mod tests {
+    use alloy::{
+        providers::ProviderBuilder,
+        sol_types::SolValue,
+        transports::mock::Asserter,
+    };
+
     use super::*;
+    use crate::decision::JwksKey;
+
+    /// A provider answering `eth_call`s from `answers`, in order.
+    fn mocked(answers: &[Vec<u8>]) -> impl Provider {
+        let asserter = Asserter::new();
+        for answer in answers {
+            asserter.push_success(&Bytes::from(answer.clone()));
+        }
+        ProviderBuilder::new().connect_mocked_client(asserter)
+    }
+
+    fn live(entries: usize) -> LiveKeys {
+        LiveKeys {
+            keys: vec![JwksKey {
+                kid: "k".into(),
+                modulus_hash: Default::default(),
+            }],
+            entries,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_contract_pinning_another_host_is_refused() {
+        let provider = mocked(&[keccak256("www.googleapis.com").abi_encode()]);
+        let err = read_roots(&provider, Issuer::Telegram, Address::ZERO, &live(1), 0)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("pins another host than oauth.telegram.org"),
+            "{err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn more_entries_than_max_keys_are_refused() {
+        let provider = mocked(&[
+            keccak256("oauth.telegram.org").abi_encode(),
+            U256::from(4).abi_encode(),
+        ]);
+        let err = read_roots(&provider, Issuer::Telegram, Address::ZERO, &live(5), 0)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("TooManyKeys"), "{err:#}");
+    }
 
     /// Both halves of the record land in the corresponding ABI slot,
     /// untouched: decode the encoded calldata back and compare. This is the

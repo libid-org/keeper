@@ -76,37 +76,58 @@ pub enum Issuer {
     Telegram,
 }
 
+/// One issuer's constants.
+struct Profile {
+    /// Name for logs and the status table.
+    name: &'static str,
+    /// The TLS server name and `Host` value.
+    host: &'static str,
+    /// The request path.
+    path: &'static str,
+}
+
+const GOOGLE: Profile = Profile {
+    name: "google",
+    host: "www.googleapis.com",
+    path: "/oauth2/v3/certs",
+};
+
+const TELEGRAM: Profile = Profile {
+    name: "telegram",
+    host: "oauth.telegram.org",
+    path: "/.well-known/jwks.json",
+};
+
 impl Issuer {
     /// Every issuer, in the order a tick serves them.
     pub const ALL: [Self; 2] = [Self::Google, Self::Telegram];
 
-    /// Name for logs and the status table.
-    pub fn name(self) -> &'static str {
+    fn profile(self) -> &'static Profile {
         match self {
-            Self::Google => "google",
-            Self::Telegram => "telegram",
+            Self::Google => &GOOGLE,
+            Self::Telegram => &TELEGRAM,
         }
     }
 
     /// The TLS server name and `Host` value.
     pub fn host(self) -> &'static str {
-        match self {
-            Self::Google => "www.googleapis.com",
-            Self::Telegram => "oauth.telegram.org",
-        }
+        self.profile().host
     }
 
     /// The request path.
     pub fn path(self) -> &'static str {
-        match self {
-            Self::Google => "/oauth2/v3/certs",
-            Self::Telegram => "/.well-known/jwks.json",
-        }
+        self.profile().path
     }
 
     /// The URL both the poll and the notarized reading fetch.
     pub fn url(self) -> String {
         format!("https://{}{}", self.host(), self.path())
+    }
+}
+
+impl std::fmt::Display for Issuer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.pad(self.profile().name)
     }
 }
 

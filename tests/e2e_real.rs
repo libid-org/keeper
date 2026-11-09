@@ -220,12 +220,8 @@ async fn keeper_rotates_the_roots_through_a_real_notary() {
             .bytes()
             .await
             .unwrap();
-        let keys = decision::parse_jwks(&body).unwrap();
-        assert!(
-            !keys.is_empty(),
-            "{} publishes at least one key",
-            issuer.name()
-        );
+        let keys = decision::parse_jwks(&body).unwrap().keys;
+        assert!(!keys.is_empty(), "{} publishes at least one key", issuer);
         live.push(keys);
     }
 
@@ -272,7 +268,7 @@ async fn keeper_rotates_the_roots_through_a_real_notary() {
             notary_service,
             "{}'s roots contract verifies through a Notary Service other than \
              the one the network file declares",
-            issuer.name()
+            issuer
         );
         // What the rotations cost, as the chain states it.
         fee += roots.quoteRotation().call().await.unwrap();
@@ -312,7 +308,7 @@ async fn keeper_rotates_the_roots_through_a_real_notary() {
             assert!(
                 expiry > U256::ZERO,
                 "{} modulus of {} not trusted",
-                issuer.name(),
+                issuer,
                 key.kid
             );
         }
