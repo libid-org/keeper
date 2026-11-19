@@ -1,9 +1,10 @@
 name: CI
 
-# Three jobs: rust (fmt/clippy/test), e2e (the real rotation path — notary
-# image, deployed stack, live Google) and dco. rust and dco are the same shape
-# as the other libid-org repos (notary, libid-rs), so a contributor moving
-# between them meets the same gates; e2e is this repo's own, and the heaviest.
+# Four jobs: rust (fmt/clippy/test), e2e (the real rotation path — notary
+# image, deployed stack, live Google), dco and tlsn-lock (Cargo.lock's tlsn
+# commit). rust and dco are the same shape as the other libid-org repos
+# (notary, libid-rs), so a contributor moving between them meets the same
+# gates; e2e is this repo's own, and the heaviest.
 #
 # Every third-party action is pinned by commit SHA, with the tag in a comment,
 # so a moved tag cannot change what executes.
@@ -67,10 +68,10 @@ jobs:
         run: cargo +"$NIGHTLY" fmt --all -- --check
 
       - name: Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
       - name: Tests
-        run: cargo test --all
+        run: cargo test --locked --all
 
   # ---------------------------------------------------------------------------
   # E2E: the rotation path for real — the released notary image, the contract
@@ -103,7 +104,7 @@ jobs:
         run: docker compose up -d --wait --build
 
       - name: Rotate through the notary against live Google
-        run: cargo test --test e2e_real -- --ignored --nocapture
+        run: cargo test --locked --test e2e_real -- --ignored --nocapture
 
       - name: Logs
         if: failure()
@@ -177,3 +178,18 @@ jobs:
             exit 1
           fi
           echo "All commits in $range are signed off."
+
+  # ---------------------------------------------------------------------------
+  # libid-tlsn pins tlsn by tag, and a tag can move. The lock holds every
+  # tlsnotary/tlsn crate to the commit the tag named when it was pinned, the
+  # same commit the notary image this keeper talks to is built from.
+  # ---------------------------------------------------------------------------
+  tlsn-lock:
+    name: tlsn lock commit
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Every tlsn crate resolves to v0.1.0-beta.1's commit
+        run: ./scripts/tlsn-lock.sh 40a069565a2eaecbb5e691dbc634be20e8498daf
