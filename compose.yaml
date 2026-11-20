@@ -40,7 +40,7 @@ services:
   # against the binary a deployment runs. The pin lives here and nowhere
   # else.
   notary:
-    image: ghcr.io/libid-org/notary:0.6.0@sha256:04ce0cde4ab3f4e1f98ac82945bbad70cefeca837ea8bcf46c5a7d112ea7f025
+    image: ghcr.io/libid-org/notary:0.7.0@sha256:66c04302d0d4752fbcafbafb5c03313f231dc93c0202f2d2d2b643bac75dd026
     environment:
       NOTARY_HOST: 0.0.0.0
       NOTARY_PORT: 7047
