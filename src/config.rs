@@ -5,9 +5,10 @@
 //! (`network_file = "networks/eden-testnet.toml"`). That repo is the source of
 //! truth for deployed contract addresses; the keeper reads only the fields it
 //! needs and ignores the rest, so additions over there do not break a keeper.
-//! Renames do, so the keeper accepts both spellings of the one field it wants:
+//! Renames do, so the keeper accepts both spellings of Google's roots:
 //! `[contracts].google_jwt_roots` (0.10 and later) and
-//! `[identity].identity_jwks_roots` (before it).
+//! `[identity].identity_jwks_roots` (before it). Telegram's are
+//! `[contracts].telegram_jwt_roots`.
 //!
 //! A real network's file names no endpoint: where its node listens is a
 //! secret of the environment that reaches it, so the entry sets `rpc_url`
@@ -35,7 +36,10 @@ use anyhow::{
 use serde::Deserialize;
 use toml::de;
 
-use crate::rpc::RpcUrl;
+use crate::{
+    jwks::Issuer,
+    rpc::RpcUrl,
+};
 
 /// Default RPC timeout: a node answers a read in well under a second, so a
 /// call still unanswered after half a minute is stuck.
@@ -107,9 +111,12 @@ pub struct NetworkEntry {
     /// Inline: address of the `GoogleJwtRoots` proxy.
     #[serde(default)]
     pub google_jwt_roots: Option<String>,
+    /// Inline: address of the `TelegramJwtRoots` proxy.
+    #[serde(default)]
+    pub telegram_jwt_roots: Option<String>,
     /// By reference: path to a chain-configurations network file, relative
     /// to the keeper.toml that names it. Mutually exclusive with `name` and
-    /// `google_jwt_roots` — the file is the source of truth for both.
+    /// the roots addresses — the file is the source of truth for them.
     #[serde(default)]
     pub network_file: Option<PathBuf>,
     /// Per-network gas signer spec, overriding the global `signer`.
@@ -117,13 +124,13 @@ pub struct NetworkEntry {
     pub signer: Option<String>,
 }
 
-/// A network after resolution: the contract known, its address parsed.
+/// A network after resolution: its roots contracts known, their addresses
+/// parsed.
 ///
-/// One JWKS contract per network: `GoogleJwtRoots`, the signing keys the
-/// `google/v1` Platform Verifier trusts, which verifies a rotation through
-/// the Notary Service.
-/// The login stack's `GoogleOidcVerifier` used to be a second target; it is
-/// archived with the rest of that product and is not kept fresh any more.
+/// One roots contract per issuer: `GoogleJwtRoots` and `TelegramJwtRoots`,
+/// the signing keys the `google/v1` and `telegram/v1` Platform Verifiers
+/// trust, each verifying a rotation through the Notary Service. A network
+/// has at least one.
 #[derive(Debug, Clone)]
 pub struct ResolvedNetwork {
     /// Network name.
@@ -135,7 +142,9 @@ pub struct ResolvedNetwork {
     /// Gas signer spec (per-network override, else the global default).
     pub signer: Option<String>,
     /// The `GoogleJwtRoots` proxy on this network.
-    pub google_jwt_roots: Address,
+    pub google_jwt_roots: Option<Address>,
+    /// The `TelegramJwtRoots` proxy on this network.
+    pub telegram_jwt_roots: Option<Address>,
 }
 
 /// A TOML document that does not parse, placed by line and column without the
@@ -224,12 +233,15 @@ impl NetworkEntry {
             .or_else(|| global_signer.map(str::to_string));
         let resolved = match &self.network_file {
             Some(file) => {
-                if self.name.is_some() || self.google_jwt_roots.is_some() {
+                if self.name.is_some()
+                    || self.google_jwt_roots.is_some()
+                    || self.telegram_jwt_roots.is_some()
+                {
                     bail!(
-                        "network entry referencing '{}' also sets `name` or \
-                         `google_jwt_roots` — the chain-configurations file is the \
-                         source of truth for both; only `rpc_url` and `signer` may \
-                         accompany `network_file`",
+                        "network entry referencing '{}' also sets `name` or a roots \
+                         address — the chain-configurations file is the source of \
+                         truth for them; only `rpc_url` and `signer` may accompany \
+                         `network_file`",
                         file.display()
                     );
                 }
@@ -253,7 +265,12 @@ impl NetworkEntry {
                         )
                     })?
                     .to_string();
-                (parsed.network.name, rpc_url, parsed.google_jwt_roots)
+                (
+                    parsed.network.name,
+                    rpc_url,
+                    parsed.google_jwt_roots,
+                    parsed.telegram_jwt_roots,
+                )
             }
             None => {
                 let name = self
@@ -263,46 +280,68 @@ impl NetworkEntry {
                 let rpc_url = self.rpc_url.clone().with_context(|| {
                     format!("inline network '{name}' is missing `rpc_url`")
                 })?;
-                let roots = parse_roots(self.google_jwt_roots.as_deref(), &name)?;
-                (name, rpc_url, roots)
+                let google = parse_roots(
+                    self.google_jwt_roots.as_deref(),
+                    "google_jwt_roots",
+                    &name,
+                )?;
+                let telegram = parse_roots(
+                    self.telegram_jwt_roots.as_deref(),
+                    "telegram_jwt_roots",
+                    &name,
+                )?;
+                (name, rpc_url, google, telegram)
             }
         };
-        let (name, rpc_url, roots) = resolved;
+        let (name, rpc_url, google_jwt_roots, telegram_jwt_roots) = resolved;
         let rpc_url: RpcUrl = rpc_url
             .parse()
             .with_context(|| format!("network '{name}': invalid rpc_url"))?;
-        let Some(google_jwt_roots) = roots else {
+        if google_jwt_roots.is_none() && telegram_jwt_roots.is_none() {
             bail!(
-                "network '{name}' names no JWKS contract (set google_jwt_roots, \
-                 or reference a network file with it deployed)"
+                "network '{name}' names no JWKS contract (set google_jwt_roots or \
+                 telegram_jwt_roots, or reference a network file with one deployed)"
             );
-        };
+        }
         Ok(ResolvedNetwork {
             name,
             rpc_url,
             rpc_timeout,
             signer,
             google_jwt_roots,
+            telegram_jwt_roots,
         })
     }
 }
 
 impl ResolvedNetwork {
+    /// `issuer`'s roots contract on this network, if one is deployed.
+    pub fn roots(&self, issuer: Issuer) -> Option<Address> {
+        match issuer {
+            Issuer::Google => self.google_jwt_roots,
+            Issuer::Telegram => self.telegram_jwt_roots,
+        }
+    }
+
     /// A client for this network's endpoint, bounded by its `rpc_timeout`.
     pub fn client(&self) -> reqwest::Result<RpcClient> {
         self.rpc_url.client(self.rpc_timeout)
     }
 }
 
-/// Parse the `google_jwt_roots` address, which may be absent or empty
-/// ("" means "not deployed" in the chain-configurations convention).
-fn parse_roots(value: Option<&str>, network: &str) -> Result<Option<Address>> {
+/// Parse a roots address, which may be absent or empty ("" means "not
+/// deployed" in the chain-configurations convention).
+fn parse_roots(
+    value: Option<&str>,
+    field: &str,
+    network: &str,
+) -> Result<Option<Address>> {
     let Some(raw) = value else { return Ok(None) };
     if raw.is_empty() {
         return Ok(None);
     }
     let address = raw.parse().with_context(|| {
-        format!("network '{network}': invalid google_jwt_roots address '{raw}'")
+        format!("network '{network}': invalid {field} address '{raw}'")
     })?;
     Ok(Some(address))
 }
@@ -356,6 +395,8 @@ impl NetworkFileNetwork {
 struct NetworkFileContracts {
     #[serde(default)]
     google_jwt_roots: Option<String>,
+    #[serde(default)]
+    telegram_jwt_roots: Option<String>,
 }
 
 /// `[identity]`, pre-0.10 only — absent section = identity stack not wanted.
@@ -365,11 +406,12 @@ struct NetworkFileIdentity {
     identity_jwks_roots: Option<String>,
 }
 
-/// A network file plus the address extracted from it (`None` when the file
-/// records no deployed `GoogleJwtRoots`).
+/// A network file plus the addresses extracted from it (`None` where the
+/// file records no deployed contract).
 struct ParsedNetworkFile {
     network: NetworkFileNetwork,
     google_jwt_roots: Option<Address>,
+    telegram_jwt_roots: Option<Address>,
 }
 
 impl NetworkFile {
@@ -390,10 +432,20 @@ impl NetworkFile {
                     .as_ref()
                     .and_then(|i| i.identity_jwks_roots.as_deref())
             });
-        let google_jwt_roots = parse_roots(raw, &parsed.network.name)?;
+        let name = &parsed.network.name;
+        let google_jwt_roots = parse_roots(raw, "google_jwt_roots", name)?;
+        let telegram_jwt_roots = parse_roots(
+            parsed
+                .contracts
+                .as_ref()
+                .and_then(|c| c.telegram_jwt_roots.as_deref()),
+            "telegram_jwt_roots",
+            name,
+        )?;
         Ok(ParsedNetworkFile {
             network: parsed.network,
             google_jwt_roots,
+            telegram_jwt_roots,
         })
     }
 }

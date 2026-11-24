@@ -1,13 +1,14 @@
 //! The whole loop for real: a running notary, the contract stack
-//! `libid-deploy` lays down on anvil, Google's live JWKS, and one genuine
-//! MPC-TLS rotation.
+//! `libid-deploy` lays down on anvil, each issuer's live JWKS, and one
+//! genuine MPC-TLS rotation per issuer.
 //!
 //! The only test that drives a rotation: the keeper's prover runs a real
-//! session against `www.googleapis.com` through a notary it does not share a
-//! crate with, reads the signed record back off the wire, and
-//! `GoogleJwtRoots` accepts it. It is `#[ignore]`d because it needs two
-//! things a plain `cargo test` does not have -- the stack in `compose.yaml`
-//! and network to Google -- so CI runs it in a job of its own.
+//! session against each issuer whose roots contract the network file names,
+//! through a notary it does not share a crate with, reads the signed record
+//! back off the wire, and the roots contract accepts it. It is `#[ignore]`d
+//! because it needs two things a plain `cargo test` does not have -- the
+//! stack in `compose.yaml` and network to the issuers -- so CI runs it in a
+//! job of its own.
 //!
 //! # Running it
 //!
@@ -42,7 +43,7 @@
 //! * `KEEPER_E2E_CAPTURE=<path>` -- also write the record the keeper
 //!   obtained -- attested data, signature, the address the signature
 //!   recovers to and the notary's `createdAt` -- as JSON, which is how a
-//!   contract test gets a fixture Google actually served.
+//!   contract test gets a fixture the first issuer actually served.
 
 use std::path::{
     Path,
@@ -62,9 +63,11 @@ use alloy::{
 use keeper::{
     config::KeeperConfig,
     decision,
+    jwks::Issuer,
     proof::ProofSource,
     run,
 };
+// `JwtRootsBase`'s ABI, which `TelegramJwtRoots` shares.
 use libid_contracts::bindings::ceremony::{
     GoogleJwtRoots,
     NotaryService,
@@ -87,8 +90,6 @@ const NOTARY_KEY: &str =
 const DEFAULT_RPC_URL: &str = "http://127.0.0.1:8545";
 /// Where compose publishes the stack's notary.
 const DEFAULT_NOTARY: &str = "127.0.0.1:7047";
-/// Google's live key set -- the same endpoint the notarized session reads.
-const GOOGLE_JWKS_URL: &str = "https://www.googleapis.com/oauth2/v3/certs";
 
 fn write_keeper_toml(dir: &Path, contents: &str) -> PathBuf {
     let path = dir.join("keeper.toml");
@@ -183,7 +184,15 @@ async fn keeper_rotates_the_roots_through_a_real_notary() {
     let [network] = networks.as_slice() else {
         panic!("one network file resolves to one network, got {networks:?}");
     };
-    let jwt_roots = network.google_jwt_roots;
+    // Every issuer whose roots the file names; each gets its first rotation.
+    let issuers: Vec<(Issuer, Address)> = Issuer::ALL
+        .into_iter()
+        .filter_map(|issuer| network.roots(issuer).map(|roots| (issuer, roots)))
+        .collect();
+    assert!(
+        !issuers.is_empty(),
+        "the network file names no roots contract"
+    );
     let declared: DeclaredStack =
         toml::from_str(&std::fs::read_to_string(&network_file).unwrap()).unwrap();
     let notary_service = declared.contracts.notary_service;
@@ -197,27 +206,32 @@ async fn keeper_rotates_the_roots_through_a_real_notary() {
         .wallet(wallet)
         .connect_client(network.client().unwrap());
 
-    // The keys the chain must end up trusting: Google's live set, read the
-    // same way the keeper's poll reads it. (Google rotating between this
-    // fetch and the notarized session would fail the per-key assertions
+    // The keys the chain must end up trusting: each issuer's live set, read
+    // the same way the keeper's poll reads it. (An issuer rotating between
+    // this fetch and the notarized session would fail the per-key assertions
     // below; that window is seconds wide.)
-    let body = reqwest::get(GOOGLE_JWKS_URL)
-        .await
-        .unwrap()
-        .error_for_status()
-        .unwrap()
-        .bytes()
-        .await
-        .unwrap();
-    let google_keys = decision::parse_google_jwks(&body).unwrap();
-    assert!(!google_keys.is_empty(), "Google publishes at least one key");
+    let mut live = Vec::new();
+    for &(issuer, _) in &issuers {
+        let body = reqwest::get(issuer.url())
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        let keys = decision::parse_jwks(&body).unwrap().keys;
+        assert!(!keys.is_empty(), "{} publishes at least one key", issuer);
+        live.push(keys);
+    }
 
     // Optionally capture a record first: one extra MPC-TLS session, and the
     // signature is checked to recover to the trusted notary before writing.
     if let Ok(out) = std::env::var("KEEPER_E2E_CAPTURE") {
+        let (issuer, _) = issuers[0];
         let session = ProofSource::from_config(&config)
             .unwrap()
-            .obtain()
+            .obtain(issuer)
             .await
             .expect("real notarized session");
         let digest = libid_crypto::keccak256(&session.attested_data);
@@ -233,7 +247,7 @@ async fn keeper_rotates_the_roots_through_a_real_notary() {
             "created_at": created_at(&session.attested_data),
             "attested_data": format!("0x{}", hex::encode(&session.attested_data)),
             "notary_signature": format!("0x{}", hex::encode(&session.notary_signature)),
-            "endpoint": GOOGLE_JWKS_URL,
+            "endpoint": issuer.url(),
             "captured_at": std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
@@ -242,17 +256,23 @@ async fn keeper_rotates_the_roots_through_a_real_notary() {
         std::fs::write(&out, serde_json::to_vec_pretty(&record).unwrap()).unwrap();
     }
 
-    let roots = GoogleJwtRoots::new(jwt_roots, &provider);
-    // The two ways a deployed stack can be wrong for this keeper: the fee
-    // would land in a service the roots contract does not verify through,
-    // or the notary's signature would recover to a key the service does not
-    // trust.
-    assert_eq!(
-        roots.notaryService().call().await.unwrap(),
-        notary_service,
-        "the roots contract verifies through a Notary Service other than the \
-         one the network file declares"
-    );
+    let mut fee = U256::ZERO;
+    for &(issuer, jwt_roots) in &issuers {
+        let roots = GoogleJwtRoots::new(jwt_roots, &provider);
+        // The two ways a deployed stack can be wrong for this keeper: the fee
+        // would land in a service the roots contract does not verify through,
+        // or the notary's signature would recover to a key the service does
+        // not trust.
+        assert_eq!(
+            roots.notaryService().call().await.unwrap(),
+            notary_service,
+            "{}'s roots contract verifies through a Notary Service other than \
+             the one the network file declares",
+            issuer
+        );
+        // What the rotations cost, as the chain states it.
+        fee += roots.quoteRotation().call().await.unwrap();
+    }
     assert!(
         NotaryService::new(notary_service, &provider)
             .isTrustedNotary(trusted)
@@ -262,35 +282,41 @@ async fn keeper_rotates_the_roots_through_a_real_notary() {
         "the Notary Service does not trust {trusted}, the address the \
          notary's signature recovers to"
     );
-    // What one rotation costs, as the chain states it.
-    let fee = roots.quoteRotation().call().await.unwrap();
     let service_balance_before = provider.get_balance(notary_service).await.unwrap();
 
     // ── dry run: rotation needed, nothing submitted, no session ─────────────
     let outcome = run::tick(&config, &networks, true).await;
-    assert_eq!(outcome.networks_read, 1);
-    assert_eq!(outcome.rotations_needed, 1);
+    assert_eq!(outcome.contracts_read, issuers.len());
+    assert_eq!(outcome.rotations_needed, issuers.len());
     assert_eq!(outcome.rotations_submitted, 0);
     assert_eq!(outcome.errors, 0);
 
-    // ── the real tick: one MPC-TLS session against Google through the notary,
-    // one rotation, one fee ─────────────────────────────────────────────────
+    // ── the real tick: one MPC-TLS session per issuer through the notary, one
+    // rotation and one fee each ──────────────────────────────────────────────
     let outcome = run::tick(&config, &networks, false).await;
     assert_eq!(outcome.errors, 0, "the real session or the rotation failed");
-    assert_eq!(outcome.rotations_submitted, 1);
+    assert_eq!(outcome.rotations_submitted, issuers.len());
     assert!(outcome.is_success());
-    for key in &google_keys {
-        let expiry = roots
-            .trustedHashExpiresAt(key.modulus_hash)
-            .call()
-            .await
-            .unwrap();
-        assert!(expiry > U256::ZERO, "modulus of {} not trusted", key.kid);
+    for (&(issuer, jwt_roots), keys) in issuers.iter().zip(&live) {
+        let roots = GoogleJwtRoots::new(jwt_roots, &provider);
+        for key in keys {
+            let expiry = roots
+                .trustedHashExpiresAt(key.modulus_hash)
+                .call()
+                .await
+                .unwrap();
+            assert!(
+                expiry > U256::ZERO,
+                "{} modulus of {} not trusted",
+                issuer,
+                key.kid
+            );
+        }
+        let generations = roots.currentKeys().call().await.unwrap();
+        assert_eq!(generations.current.moduli.len(), keys.len());
+        assert!(generations.previous.moduli.is_empty());
+        assert!(!roots.needsRotation().call().await.unwrap());
     }
-    let generations = roots.currentKeys().call().await.unwrap();
-    assert_eq!(generations.current.moduli.len(), google_keys.len());
-    assert!(generations.previous.moduli.is_empty());
-    assert!(!roots.needsRotation().call().await.unwrap());
     let service_balance_after = provider.get_balance(notary_service).await.unwrap();
     assert_eq!(service_balance_after - service_balance_before, fee);
 

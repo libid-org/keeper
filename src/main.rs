@@ -20,7 +20,7 @@ use tracing_subscriber::{
     EnvFilter,
 };
 
-/// Keeps Google JWKS roots fresh on-chain, permissionlessly.
+/// Keeps Google and Telegram JWKS roots fresh on-chain, permissionlessly.
 #[derive(Parser, Debug)]
 #[command(name = "keeper", version, about)]
 struct Cli {
@@ -48,7 +48,7 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Read-only table: per network, on-chain roots vs Google's live set.
+    /// Read-only table: per issuer and network, on-chain roots vs the live set.
     Status,
 }
 

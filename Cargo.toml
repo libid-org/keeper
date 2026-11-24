@@ -8,7 +8,7 @@ edition = "2021"
 rust-version = "1.95"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/libid-org/keeper"
-description = "Permissionless keeper that keeps Google's JWT signing keys trusted on chain: obtains MPC-TLS notarized readings of Google's JWKS from a libid notary and submits rotate() to GoogleJwtRoots on every configured network, paying the Notary Fee."
+description = "Permissionless keeper that keeps Google's and Telegram's JWT signing keys trusted on chain: obtains MPC-TLS notarized readings of each issuer's JWKS from a libid notary and submits rotate() to its roots contract on every configured network, paying the Notary Fee."
 # A binary + companion library, never a registry crate: it names git-only
 # libid-rs crates (libid-tlsn), which cargo refuses to publish.
 publish = false
@@ -60,14 +60,16 @@ clap = { version = "4", features = ["derive", "env"] }
 hex = "0.4"
 humantime-serde = "1"
 num-bigint = "0.5"
-# Plain-HTTPS fetch of Google's live JWKS (the cheap poll; notarization
-# happens only when a rotation is actually needed). The same 0.13 alloy's
-# HTTP transport pulls, with the TLS backend it already turns on (`rustls`
+# Plain-HTTPS fetch of each issuer's live JWKS (the cheap poll; notarization
+# happens only when a rotation is actually needed). `gzip` because Telegram
+# compresses some replies even when the request asks for none. The same 0.13
+# alloy's HTTP transport pulls, with the TLS backend it already turns on (`rustls`
 # is 0.12's `rustls-tls`: aws-lc-rs plus the platform verifier), so the build
 # carries ONE reqwest and one TLS stack.
 reqwest = { version = "0.13", default-features = false, features = [
     "rustls",
     "json",
+    "gzip",
 ] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -1,17 +1,18 @@
 //! The libID JWKS keeper.
 //!
-//! Keeps Google's JWT signing keys trusted ON-CHAIN, permissionlessly, across
-//! every network it is configured for (`GoogleJwtRoots`, read by the
-//! `google/v1` Platform Verifier). Each tick it:
+//! Keeps OIDC issuers' JWT signing keys trusted ON-CHAIN, permissionlessly,
+//! across every network it is configured for: Google's in `GoogleJwtRoots`
+//! and Telegram's in `TelegramJwtRoots`, read by the `google/v1` and
+//! `telegram/v1` Platform Verifiers. Each tick, per issuer, it:
 //!
-//! 1. fetches Google's live JWKS over plain HTTPS (the cheap poll);
-//! 2. reads each configured contract's trusted-key state;
-//! 3. decides whether a rotation is needed (a key Google publishes is not
+//! 1. fetches the issuer's live JWKS over plain HTTPS (the cheap poll);
+//! 2. reads each configured roots contract's trusted-key state;
+//! 3. decides whether a rotation is needed (a key the issuer publishes is not
 //!    trusted on-chain, or a trusted key is nearing its on-chain expiry);
 //! 4. only then obtains a NOTARIZED reading of the same endpoint — an
 //!    MPC-TLS session against a libid notary server, revealed whole — and
-//!    submits `rotate(attestedData, proof)` to every `GoogleJwtRoots`
-//!    that needs it, with the Notary Fee attached.
+//!    submits `rotate(attestedData, proof)` to every roots contract that
+//!    needs it, with the Notary Fee attached.
 //!
 //! The keeper holds no privileged key. `rotate()` is permissionless: the
 //! notary attestation is the authorization (the contract verifies it through
