@@ -24,6 +24,7 @@ use alloy::{
         Address,
         Bytes,
         TxHash,
+        B256,
         U256,
     },
     providers::Provider,
@@ -48,12 +49,17 @@ use crate::decision::{
 pub struct RootsReading {
     /// `(kid, verdict)` for every key Google currently publishes.
     pub keys: Vec<(String, KeyVerdict)>,
+    /// Moduli in the contract's current generation that Google no longer
+    /// publishes. A rotation moves them to `previous`, where they lose trust
+    /// after its grace period instead of at the next renewal.
+    pub dropped: Vec<B256>,
 }
 
 impl RootsReading {
-    /// True when any key justifies a rotation.
+    /// True when any key justifies a rotation, or Google dropped a key the
+    /// current generation still lists.
     pub fn needs_rotation(&self) -> bool {
-        self.keys.iter().any(|(_, v)| v.needs_rotation())
+        !self.dropped.is_empty() || self.keys.iter().any(|(_, v)| v.needs_rotation())
     }
 }
 
@@ -90,7 +96,18 @@ pub async fn read_roots<P: Provider>(
             key_verdict(to_expiry(expiry), now, threshold),
         ));
     }
-    Ok(RootsReading { keys })
+    let current = contract
+        .currentKeys()
+        .call()
+        .await
+        .context("currentKeys() failed")?
+        .current;
+    let dropped = current
+        .moduli
+        .into_iter()
+        .filter(|modulus| !google_keys.iter().any(|key| key.modulus_hash == *modulus))
+        .collect();
+    Ok(RootsReading { keys, dropped })
 }
 
 /// Collapse a U256 expiry to the `Option<u64>` the verdict works over. Zero
@@ -156,7 +173,80 @@ pub async fn submit_rotation<P: Provider>(
 
 #[cfg(test)]
 mod tests {
+    use std::slice;
+
+    use alloy::{
+        primitives::B256,
+        providers::ProviderBuilder,
+        transports::mock::Asserter,
+    };
+    use libid_contracts::bindings::ceremony::GoogleJwtRoots::{
+        currentKeysCall,
+        currentKeysReturn,
+        trustedHashExpiresAtCall,
+        Generation,
+    };
+
     use super::*;
+
+    const NOW: u64 = 1_700_000_000;
+    const WEEK: u64 = 7 * 24 * 60 * 60;
+
+    fn key(kid: &str, seed: u8) -> GoogleKey {
+        GoogleKey {
+            kid: kid.into(),
+            modulus_hash: B256::repeat_byte(seed),
+        }
+    }
+
+    /// `read_roots` over a contract that trusts every one of `google` for a
+    /// month and lists `current` as its current generation.
+    async fn reading(google: &[GoogleKey], current: Vec<B256>) -> RootsReading {
+        let asserter = Asserter::new();
+        for _ in google {
+            let expiry = U256::from(NOW + 4 * WEEK);
+            asserter.push_success(&Bytes::from(
+                trustedHashExpiresAtCall::abi_encode_returns(&expiry),
+            ));
+        }
+        let generations = currentKeysReturn {
+            current: Generation {
+                observedAt: NOW,
+                moduli: current,
+            },
+            previous: Generation {
+                observedAt: 0,
+                moduli: Vec::new(),
+            },
+        };
+        asserter.push_success(&Bytes::from(currentKeysCall::abi_encode_returns(
+            &generations,
+        )));
+        let provider = ProviderBuilder::new().connect_mocked_client(asserter);
+        read_roots(&provider, Address::ZERO, google, NOW, WEEK)
+            .await
+            .unwrap()
+    }
+
+    /// Google dropped K2 and still publishes K1, both fresh on chain: the
+    /// current generation's K2 is what calls for the rotation.
+    #[tokio::test]
+    async fn a_current_key_google_dropped_needs_a_rotation() {
+        let k1 = key("k1", 1);
+        let k2 = key("k2", 2);
+        let reading =
+            reading(slice::from_ref(&k1), vec![k1.modulus_hash, k2.modulus_hash]).await;
+        assert!(reading.needs_rotation(), "{reading:?}");
+    }
+
+    /// The current generation is exactly Google's set, every key fresh.
+    #[tokio::test]
+    async fn a_current_generation_matching_google_needs_no_rotation() {
+        let google = [key("k1", 1), key("k2", 2)];
+        let current = google.iter().map(|key| key.modulus_hash).collect();
+        let reading = reading(&google, current).await;
+        assert!(!reading.needs_rotation(), "{reading:?}");
+    }
 
     /// Both halves of the record land in the corresponding ABI slot,
     /// untouched: decode the encoded calldata back and compare. This is the

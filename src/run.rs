@@ -134,6 +134,14 @@ pub async fn tick(
                             "rotation required"
                         );
                     }
+                    for modulus in &reading.dropped {
+                        tracing::info!(
+                            network = %network.name,
+                            contract = %contract,
+                            modulus = %modulus,
+                            "rotation required: Google no longer publishes this current key"
+                        );
+                    }
                     needy.push((network, reading));
                 } else {
                     tracing::info!(
@@ -287,6 +295,9 @@ pub async fn status(config: &KeeperConfig, networks: &[ResolvedNetwork]) -> Resu
                         left,
                         verdict.label()
                     );
+                }
+                for modulus in &reading.dropped {
+                    println!("{:<16} {modulus} dropped by Google", network.name);
                 }
                 println!(
                     "{:<16} {} => {}",
