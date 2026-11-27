@@ -4,6 +4,11 @@
 //! Google publishes" plus "what the contract trusts until when" into a
 //! verdict, so the logic is unit-testable without a node.
 
+use std::{
+    collections::BTreeSet,
+    time::Duration,
+};
+
 use alloy::primitives::B256;
 use anyhow::{
     bail,
@@ -34,15 +39,17 @@ pub struct GoogleKey {
 
 /// Wire shape of `oauth2/v3/certs`, reduced to what the decision needs.
 #[derive(Debug, Deserialize)]
-struct Jwks {
-    keys: Vec<Jwk>,
+#[cfg_attr(test, derive(serde::Serialize))]
+pub(crate) struct Jwks {
+    pub(crate) keys: Vec<Jwk>,
 }
 
 /// One JWK entry.
 #[derive(Debug, Deserialize)]
-struct Jwk {
-    kid: String,
-    n: String,
+#[cfg_attr(test, derive(serde::Serialize))]
+pub(crate) struct Jwk {
+    pub(crate) kid: String,
+    pub(crate) n: String,
 }
 
 /// Parse a JWKS response body into [`GoogleKey`]s.
@@ -162,6 +169,25 @@ pub fn key_verdict(trusted_until: Option<u64>, now: u64, threshold: u64) -> KeyV
             }
         }
     }
+}
+
+/// The chain time the drop hold ends, while it holds: `Some(end)` while the
+/// chain's reading, made at `observed_at`, is younger than `hold` at chain
+/// time `now`, and `None` from then on.
+pub fn drop_hold_end(observed_at: u64, now: u64, hold: Duration) -> Option<u64> {
+    let end = observed_at.saturating_add(hold.as_secs());
+    (now < end).then_some(end)
+}
+
+/// True when `a` and `b` list the same moduli, in any order: the contract's
+/// own test for a reading of the set it holds.
+pub fn same_moduli(a: &[GoogleKey], b: &[GoogleKey]) -> bool {
+    let set = |keys: &[GoogleKey]| {
+        keys.iter()
+            .map(|key| key.modulus_hash)
+            .collect::<BTreeSet<_>>()
+    };
+    set(a) == set(b)
 }
 
 #[cfg(test)]

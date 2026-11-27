@@ -219,7 +219,8 @@ async fn keeper_rotates_the_roots_through_a_real_notary() {
             .unwrap()
             .obtain()
             .await
-            .expect("real notarized session");
+            .expect("real notarized session")
+            .session;
         let digest = libid_crypto::keccak256(&session.attested_data);
         let recovered = Address::from(pubkey_to_eth_address(
             &recover_eth_claim(&session.notary_signature, &digest).unwrap(),

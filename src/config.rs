@@ -49,6 +49,11 @@ const DEFAULT_POLL_INTERVAL_SECS: u64 = 60 * 60;
 /// days. Matches the rotation listener this keeper replaces.
 const DEFAULT_RENEWAL_THRESHOLD_SECS: u64 = 7 * 24 * 60 * 60;
 
+/// How old the chain's reading must be before a key Google dropped calls for
+/// a rotation. Google's backends can disagree on the set for a while; the
+/// hold caps the drops a disagreement can buy at one per this many seconds.
+pub const DROP_HOLD: Duration = Duration::from_secs(6 * 60 * 60);
+
 /// The parsed `keeper.toml`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]

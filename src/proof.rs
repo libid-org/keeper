@@ -1,11 +1,12 @@
-//! Obtaining a [`NotarizedSession`] — the notarized reading of Google's JWKS:
+//! Obtaining a [`NotarizedJwks`] — the notarized reading of Google's JWKS:
 //! an MPC-TLS session against a running libid notary's TCP wire port, driven
 //! by this crate's own prover-side helpers
 //! ([`crate::jwks::prover::notarize_jwks`]). What comes back is the
 //! platform-ceremonies section 4.1 bytes and the notary's signature over
-//! them — exactly what `GoogleJwtRoots.rotate` takes.
+//! them — exactly what `GoogleJwtRoots.rotate` takes — and the JWKS body
+//! they reveal.
 
-use crate::jwks::NotarizedSession;
+use crate::jwks::NotarizedJwks;
 use anyhow::{
     bail,
     Context,
@@ -41,22 +42,22 @@ impl ProofSource {
         );
     }
 
-    /// Obtain one notarized reading of Google's JWKS.
-    pub async fn obtain(&self) -> Result<NotarizedSession> {
+    /// Obtain one notarized reading of Google's JWKS, with the body it reveals.
+    pub async fn obtain(&self) -> Result<NotarizedJwks> {
         match self {
             Self::Notary(addr) => {
                 tracing::info!(notary = %addr, "starting MPC-TLS JWKS notarization");
                 let socket = TcpStream::connect(addr)
                     .await
                     .with_context(|| format!("connecting to notary at {addr}"))?;
-                let session = crate::jwks::prover::notarize_jwks(socket)
+                let reading = crate::jwks::prover::notarize_jwks(socket)
                     .await
                     .context("MPC-TLS JWKS notarization failed")?;
                 tracing::info!(
-                    attested_bytes = session.attested_data.len(),
+                    attested_bytes = reading.session.attested_data.len(),
                     "notary signed the JWKS reading"
                 );
-                Ok(session)
+                Ok(reading)
             }
         }
     }

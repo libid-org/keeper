@@ -10,6 +10,7 @@ use tokio::io::{
 
 use crate::jwks::{
     self,
+    NotarizedJwks,
     NotarizedSession,
     Result,
 };
@@ -47,13 +48,15 @@ where
 }
 
 /// Full prover round trip: run the MPC-TLS JWKS session against a notary and
-/// read back the signed [`NotarizedSession`] over the recovered socket.
-pub async fn notarize_jwks<T>(socket: T) -> Result<NotarizedSession>
+/// read back the signed [`NotarizedSession`] over the recovered socket, with
+/// the JWKS body the session revealed.
+pub async fn notarize_jwks<T>(socket: T) -> Result<NotarizedJwks>
 where
     T: AsyncWrite + AsyncRead + Send + Unpin + 'static,
 {
     let result = run_jwks_prover(socket).await?;
+    let body = result.response_body;
     let mut io = result.recovered_io;
     let session: NotarizedSession = read_msg(&mut io).await?;
-    Ok(session)
+    Ok(NotarizedJwks { session, body })
 }
