@@ -38,10 +38,14 @@ use anyhow::{
 };
 use libid_contracts::bindings::ceremony::GoogleJwtRoots;
 
-use crate::decision::{
-    key_verdict,
-    GoogleKey,
-    KeyVerdict,
+use crate::{
+    config::DROP_HOLD,
+    decision::{
+        drop_held,
+        key_verdict,
+        GoogleKey,
+        KeyVerdict,
+    },
 };
 
 /// The verdicts for one `GoogleJwtRoots`, one entry per live Google key.
@@ -53,13 +57,17 @@ pub struct RootsReading {
     /// publishes. A rotation moves them to `previous`, where they lose trust
     /// after its grace period instead of at the next renewal.
     pub dropped: Vec<B256>,
+    /// True while the chain's reading is younger than the drop hold, so
+    /// `dropped` calls for no rotation yet.
+    pub drop_held: bool,
 }
 
 impl RootsReading {
     /// True when any key justifies a rotation, or Google dropped a key the
-    /// current generation still lists.
+    /// current generation still lists and the hold has passed.
     pub fn needs_rotation(&self) -> bool {
-        !self.dropped.is_empty() || self.keys.iter().any(|(_, v)| v.needs_rotation())
+        (!self.drop_held && !self.dropped.is_empty())
+            || self.keys.iter().any(|(_, v)| v.needs_rotation())
     }
 }
 
@@ -107,7 +115,11 @@ pub async fn read_roots<P: Provider>(
         .into_iter()
         .filter(|modulus| !google_keys.iter().any(|key| key.modulus_hash == *modulus))
         .collect();
-    Ok(RootsReading { keys, dropped })
+    Ok(RootsReading {
+        keys,
+        dropped,
+        drop_held: drop_held(current.observedAt, now, DROP_HOLD),
+    })
 }
 
 /// Collapse a U256 expiry to the `Option<u64>` the verdict works over. Zero
@@ -200,8 +212,13 @@ mod tests {
     }
 
     /// `read_roots` over a contract that trusts every one of `google` for a
-    /// month and lists `current` as its current generation.
-    async fn reading(google: &[GoogleKey], current: Vec<B256>) -> RootsReading {
+    /// month and lists `current` as its current generation, read at
+    /// `observed_at`.
+    async fn reading(
+        google: &[GoogleKey],
+        current: Vec<B256>,
+        observed_at: u64,
+    ) -> RootsReading {
         let asserter = Asserter::new();
         for _ in google {
             let expiry = U256::from(NOW + 4 * WEEK);
@@ -211,7 +228,7 @@ mod tests {
         }
         let generations = currentKeysReturn {
             current: Generation {
-                observedAt: NOW,
+                observedAt: observed_at,
                 moduli: current,
             },
             previous: Generation {
@@ -228,15 +245,36 @@ mod tests {
             .unwrap()
     }
 
-    /// Google dropped K2 and still publishes K1, both fresh on chain: the
-    /// current generation's K2 is what calls for the rotation.
+    /// Google dropped K2 and still publishes K1, both fresh on chain, and the
+    /// chain's reading is as old as the hold: the current generation's K2 is
+    /// what calls for the rotation.
     #[tokio::test]
-    async fn a_current_key_google_dropped_needs_a_rotation() {
+    async fn a_current_key_google_dropped_needs_a_rotation_once_the_hold_passed() {
         let k1 = key("k1", 1);
         let k2 = key("k2", 2);
-        let reading =
-            reading(slice::from_ref(&k1), vec![k1.modulus_hash, k2.modulus_hash]).await;
+        let reading = reading(
+            slice::from_ref(&k1),
+            vec![k1.modulus_hash, k2.modulus_hash],
+            NOW - DROP_HOLD.as_secs(),
+        )
+        .await;
         assert!(reading.needs_rotation(), "{reading:?}");
+    }
+
+    /// The same drop a second inside the hold: a backend that still lists K2
+    /// may have served the reading, so no rotation yet.
+    #[tokio::test]
+    async fn a_current_key_google_dropped_needs_no_rotation_inside_the_hold() {
+        let k1 = key("k1", 1);
+        let k2 = key("k2", 2);
+        let reading = reading(
+            slice::from_ref(&k1),
+            vec![k1.modulus_hash, k2.modulus_hash],
+            NOW - DROP_HOLD.as_secs() + 1,
+        )
+        .await;
+        assert_eq!(reading.dropped, vec![k2.modulus_hash]);
+        assert!(!reading.needs_rotation(), "{reading:?}");
     }
 
     /// The current generation is exactly Google's set, every key fresh.
@@ -244,7 +282,7 @@ mod tests {
     async fn a_current_generation_matching_google_needs_no_rotation() {
         let google = [key("k1", 1), key("k2", 2)];
         let current = google.iter().map(|key| key.modulus_hash).collect();
-        let reading = reading(&google, current).await;
+        let reading = reading(&google, current, NOW).await;
         assert!(!reading.needs_rotation(), "{reading:?}");
     }
 

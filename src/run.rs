@@ -22,6 +22,7 @@ use crate::{
         self,
         GoogleKey,
     },
+    jwks::NotarizedJwks,
     proof::ProofSource,
 };
 
@@ -89,6 +90,50 @@ async fn fetch_google_keys() -> Result<Vec<GoogleKey>> {
     decision::parse_google_jwks(&body)
 }
 
+/// What a tick reads and sends: Google's live set, each network's list, one
+/// notarized reading and the rotations.
+trait Io {
+    /// Google's live key set, over plain HTTPS.
+    async fn poll(&self) -> Result<Vec<GoogleKey>>;
+    /// One network's list, classified against `google_keys`.
+    async fn read(
+        &self,
+        network: &ResolvedNetwork,
+        google_keys: &[GoogleKey],
+    ) -> Result<RootsReading>;
+    /// One notarized reading of the same endpoint.
+    async fn notarize(&self) -> Result<NotarizedJwks>;
+    /// One `rotate` on `network`, with the Notary Fee attached.
+    async fn submit(&self, network: &ResolvedNetwork, calldata: Vec<u8>) -> Result<()>;
+}
+
+/// Google's endpoint, each network's RPC and the configured notary.
+struct Live<'a> {
+    config: &'a KeeperConfig,
+}
+
+impl Io for Live<'_> {
+    async fn poll(&self) -> Result<Vec<GoogleKey>> {
+        fetch_google_keys().await
+    }
+
+    async fn read(
+        &self,
+        network: &ResolvedNetwork,
+        google_keys: &[GoogleKey],
+    ) -> Result<RootsReading> {
+        read_network(self.config, network, google_keys).await
+    }
+
+    async fn notarize(&self) -> Result<NotarizedJwks> {
+        ProofSource::from_config(self.config)?.obtain().await
+    }
+
+    async fn submit(&self, network: &ResolvedNetwork, calldata: Vec<u8>) -> Result<()> {
+        submit_to(network, calldata).await
+    }
+}
+
 /// One pass over every network. Decisions come first for ALL networks, so a
 /// single notarized reading (obtained at most once per tick) serves every
 /// contract that needs it — the record is valid anywhere the notary is
@@ -98,9 +143,18 @@ pub async fn tick(
     networks: &[ResolvedNetwork],
     dry_run: bool,
 ) -> TickOutcome {
+    tick_with(&Live { config }, networks, dry_run).await
+}
+
+/// [`tick`] over the sources `io` names.
+async fn tick_with(
+    io: &impl Io,
+    networks: &[ResolvedNetwork],
+    dry_run: bool,
+) -> TickOutcome {
     let mut outcome = TickOutcome::default();
 
-    let google_keys = match fetch_google_keys().await {
+    let google_keys = match io.poll().await {
         Ok(keys) => keys,
         Err(e) => {
             tracing::warn!(
@@ -119,7 +173,7 @@ pub async fn tick(
     // ── decide ──────────────────────────────────────────────────────────────
     let mut needy: Vec<(&ResolvedNetwork, RootsReading)> = Vec::new();
     for network in networks {
-        match read_network(config, network, &google_keys).await {
+        match io.read(network, &google_keys).await {
             Ok(reading) => {
                 outcome.networks_read += 1;
                 let contract = network.google_jwt_roots;
@@ -170,19 +224,8 @@ pub async fn tick(
     }
 
     // ── notarize once ───────────────────────────────────────────────────────
-    let source = match ProofSource::from_config(config) {
-        Ok(source) => source,
-        Err(e) => {
-            tracing::warn!(
-                error = format_args!("{e:#}"),
-                "cannot obtain a notarized reading"
-            );
-            outcome.errors += 1;
-            return outcome;
-        }
-    };
-    let session = match source.obtain().await {
-        Ok(session) => session,
+    let reading = match io.notarize().await {
+        Ok(reading) => reading,
         Err(e) => {
             tracing::warn!(
                 error = format_args!("{e:#}"),
@@ -192,11 +235,34 @@ pub async fn tick(
             return outcome;
         }
     };
-    let calldata = chain::rotate_calldata(&session);
+    // While Google's backends disagree, the poll and the session can see two
+    // sets. A rotation is paid only with a reading of the set it was decided
+    // on: a restore read from the lagging backend would refresh the dropped
+    // set and leave the restored key where it was, at a fee per tick.
+    match decision::parse_google_jwks(&reading.body) {
+        Ok(notarized) if decision::same_moduli(&notarized, &google_keys) => {}
+        Ok(notarized) => {
+            tracing::warn!(
+                polled = ?google_keys.iter().map(|k| k.kid.as_str()).collect::<Vec<_>>(),
+                notarized = ?notarized.iter().map(|k| k.kid.as_str()).collect::<Vec<_>>(),
+                "the notarized reading lists another key set than the poll; submitting nothing this tick"
+            );
+            return outcome;
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = format_args!("{e:#}"),
+                "the notarized JWKS body does not parse; submitting nothing this tick"
+            );
+            outcome.errors += 1;
+            return outcome;
+        }
+    }
+    let calldata = chain::rotate_calldata(&reading.session);
 
     // ── submit ──────────────────────────────────────────────────────────────
     for (network, _) in needy {
-        match submit_to(network, calldata.clone()).await {
+        match io.submit(network, calldata.clone()).await {
             Ok(()) => outcome.rotations_submitted += 1,
             Err(e) => {
                 tracing::warn!(
@@ -333,6 +399,9 @@ fn human_secs(secs: u64) -> String {
         format!("{hours}h{mins}m")
     }
 }
+
+#[cfg(test)]
+mod rotation_bound;
 
 #[cfg(test)]
 mod tests {

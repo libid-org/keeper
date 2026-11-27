@@ -26,6 +26,16 @@
 /// notary agree on the frame by construction.
 pub type NotarizedSession = libid_transcript::AttestationWire;
 
+/// A notarized reading and the JWKS body it reveals, decoded by the prover
+/// from the same transcript the record covers whole.
+#[derive(Debug, Clone)]
+pub struct NotarizedJwks {
+    /// The record `rotate` takes.
+    pub session: NotarizedSession,
+    /// The response body, headers stripped and framing decoded.
+    pub body: Vec<u8>,
+}
+
 /// Errors from building or obtaining a JWKS reading.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
