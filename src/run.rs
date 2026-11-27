@@ -177,6 +177,23 @@ async fn tick_with(
             Ok(reading) => {
                 outcome.networks_read += 1;
                 let contract = network.google_jwt_roots;
+                for modulus in &reading.dropped {
+                    match reading.held_until {
+                        Some(held_until) => tracing::info!(
+                            network = %network.name,
+                            contract = %contract,
+                            modulus = %modulus,
+                            held_until,
+                            "Google no longer publishes this current key; its rotation is held"
+                        ),
+                        None => tracing::info!(
+                            network = %network.name,
+                            contract = %contract,
+                            modulus = %modulus,
+                            "rotation required: Google no longer publishes this current key"
+                        ),
+                    }
+                }
                 if reading.needs_rotation() {
                     outcome.rotations_needed += 1;
                     for (kid, verdict) in &reading.keys {
@@ -186,14 +203,6 @@ async fn tick_with(
                             kid = %kid,
                             verdict = verdict.label(),
                             "rotation required"
-                        );
-                    }
-                    for modulus in &reading.dropped {
-                        tracing::info!(
-                            network = %network.name,
-                            contract = %contract,
-                            modulus = %modulus,
-                            "rotation required: Google no longer publishes this current key"
                         );
                     }
                     needy.push((network, reading));
@@ -363,7 +372,13 @@ pub async fn status(config: &KeeperConfig, networks: &[ResolvedNetwork]) -> Resu
                     );
                 }
                 for modulus in &reading.dropped {
-                    println!("{:<16} {modulus} dropped by Google", network.name);
+                    match reading.held_until {
+                        Some(held_until) => println!(
+                            "{:<16} {modulus} dropped by Google, rotation held until {held_until}",
+                            network.name
+                        ),
+                        None => println!("{:<16} {modulus} dropped by Google", network.name),
+                    }
                 }
                 println!(
                     "{:<16} {} => {}",

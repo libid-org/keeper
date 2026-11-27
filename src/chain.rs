@@ -41,7 +41,7 @@ use libid_contracts::bindings::ceremony::GoogleJwtRoots;
 use crate::{
     config::DROP_HOLD,
     decision::{
-        drop_held,
+        drop_hold_end,
         key_verdict,
         GoogleKey,
         KeyVerdict,
@@ -57,16 +57,16 @@ pub struct RootsReading {
     /// publishes. A rotation moves them to `previous`, where they lose trust
     /// after its grace period instead of at the next renewal.
     pub dropped: Vec<B256>,
-    /// True while the chain's reading is younger than the drop hold, so
-    /// `dropped` calls for no rotation yet.
-    pub drop_held: bool,
+    /// The chain time the drop hold ends, while it holds: until then
+    /// `dropped` calls for no rotation.
+    pub held_until: Option<u64>,
 }
 
 impl RootsReading {
     /// True when any key justifies a rotation, or Google dropped a key the
     /// current generation still lists and the hold has passed.
     pub fn needs_rotation(&self) -> bool {
-        (!self.drop_held && !self.dropped.is_empty())
+        (self.held_until.is_none() && !self.dropped.is_empty())
             || self.keys.iter().any(|(_, v)| v.needs_rotation())
     }
 }
@@ -118,7 +118,7 @@ pub async fn read_roots<P: Provider>(
     Ok(RootsReading {
         keys,
         dropped,
-        drop_held: drop_held(current.observedAt, now, DROP_HOLD),
+        held_until: drop_hold_end(current.observedAt, now, DROP_HOLD),
     })
 }
 
@@ -274,6 +274,7 @@ mod tests {
         )
         .await;
         assert_eq!(reading.dropped, vec![k2.modulus_hash]);
+        assert_eq!(reading.held_until, Some(NOW + 1));
         assert!(!reading.needs_rotation(), "{reading:?}");
     }
 

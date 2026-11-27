@@ -171,10 +171,12 @@ pub fn key_verdict(trusted_until: Option<u64>, now: u64, threshold: u64) -> KeyV
     }
 }
 
-/// True while the chain's reading, made at `observed_at`, is younger than
-/// `hold` at chain time `now`.
-pub fn drop_held(observed_at: u64, now: u64, hold: Duration) -> bool {
-    now < observed_at.saturating_add(hold.as_secs())
+/// The chain time the drop hold ends, while it holds: `Some(end)` while the
+/// chain's reading, made at `observed_at`, is younger than `hold` at chain
+/// time `now`, and `None` from then on.
+pub fn drop_hold_end(observed_at: u64, now: u64, hold: Duration) -> Option<u64> {
+    let end = observed_at.saturating_add(hold.as_secs());
+    (now < end).then_some(end)
 }
 
 /// True when `a` and `b` list the same moduli, in any order: the contract's
